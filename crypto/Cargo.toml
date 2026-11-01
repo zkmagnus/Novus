@@ -1,0 +1,22 @@
+[package]
+name = "crypto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["mainnet"]
+mainnet = []
+
+[dependencies]
+sha3.workspace = true
+borsh.workspace = true
+serde.workspace = true
+hex.workspace = true
+zeroize.workspace = true
+argon2.workspace = true
+static_assertions.workspace = true
+rand_core_06.workspace = true
+secp256k1 = { version = "0.29.1", path = "../dependency/vendor-schnorr/secp256k1", default-features = false, features = ["std"] }

@@ -1,0 +1,10 @@
+[package]
+name = "accretia"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+runtime-core = { package = "runtime-core", path = "../runtime" }

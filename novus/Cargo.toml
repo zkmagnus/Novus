@@ -1,0 +1,21 @@
+[package]
+name = "novus"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "novus"
+
+[features]
+default = ["mainnet"]
+mainnet = ["crypto/mainnet"]
+
+[dependencies]
+borsh.workspace = true
+static_assertions.workspace = true
+crypto.workspace = true
+serde.workspace = true
+common.workspace = true

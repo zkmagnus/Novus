@@ -1,0 +1,25 @@
+[package]
+name = "wallet"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+autobins = false
+
+[lib]
+name = "wallet"
+path = "src/lib.rs"
+
+[features]
+default = ["mainnet"]
+mainnet = ["novus/mainnet"]
+
+[dependencies]
+bip39.workspace = true
+getrandom.workspace = true
+hex.workspace = true
+novus.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+zeroize.workspace = true

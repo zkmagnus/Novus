@@ -1,0 +1,23 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "novus Node RPC",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/status": { "get": { "summary": "Get node and chain status", "responses": { "200": { "description": "Node status with finalized_height and total_mined, total_burned, and total_supply in the account race currency" } } } },
+    "/fee-policy": { "get": { "summary": "Get relay fee, protocol transfer tax, and block reward policy", "responses": { "200": { "description": "Fee rate is denominated in atomic units; fees use sender race currency and are claimed by a matching-race miner. Protocol tax is separate." } } } },
+    "/transaction": { "post": { "summary": "Submit a canonical Borsh transaction", "requestBody": { "required": true, "content": { "application/octet-stream": { "schema": { "type": "string", "contentEncoding": "binary" } } } }, "responses": { "200": { "description": "Accepted transaction ID" }, "400": { "description": "Invalid transaction" } } } },
+    "/balance/{address}": { "get": { "summary": "Get account balance and next nonce", "parameters": [{ "$ref": "#/components/parameters/Address" }], "responses": { "200": { "description": "Account balance and next mempool nonce in the account race currency" } } } },
+    "/account/{address}": { "get": { "summary": "Get account state", "parameters": [{ "$ref": "#/components/parameters/Address" }], "responses": { "200": { "description": "Account balances and nonce" } } } },
+    "/blocks/latest": { "get": { "summary": "Get latest blocks", "responses": { "200": { "description": "Blocks" } } } },
+    "/block/{height}": { "get": { "summary": "Get block by height", "parameters": [{ "name": "height", "in": "path", "required": true, "schema": { "type": "integer", "format": "uint64" } }], "responses": { "200": { "description": "Block" } } } },
+    "/explorer/address/{address}": { "get": { "summary": "Get address activity", "parameters": [{ "$ref": "#/components/parameters/Address" }], "responses": { "200": { "description": "Address activity" } } } },
+    "/explorer/transaction/{transaction_id}": { "get": { "summary": "Get confirmed transaction", "parameters": [{ "name": "transaction_id", "in": "path", "required": true, "schema": { "type": "string", "pattern": "^[0-9a-f]{64}$" } }], "responses": { "200": { "description": "Transaction" } } } }
+  },
+  "components": {
+    "parameters": {
+      "Address": { "name": "address", "in": "path", "required": true, "schema": { "type": "string" } }
+    }
+  }
+}

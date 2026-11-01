@@ -1,0 +1,29 @@
+[package]
+name = "runtime-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "runtime_core"
+path = "src/lib.rs"
+
+[features]
+default = ["mainnet"]
+mainnet = ["novus/mainnet"]
+
+[dependencies]
+bip39.workspace = true
+borsh.workspace = true
+hex.workspace = true
+serde_json.workspace = true
+serde.workspace = true
+zeroize.workspace = true
+igd-next.workspace = true
+getrandom.workspace = true
+redb.workspace = true
+novus.workspace = true
+wallet = { path = "../wallet", default-features = false }
