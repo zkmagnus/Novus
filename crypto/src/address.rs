@@ -11,7 +11,9 @@ pub const BELLATO_ADDRESS_PREFIX: &str = "bellato";
 pub const CORA_ADDRESS_PREFIX: &str = "cora";
 pub const ADDRESS_PREFIXES: [&str; 3] = ["accretia", "bellato", "cora"];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, BorshSerialize, BorshDeserialize,
+)]
 pub enum Race {
     Accretia,
     Bellato,
@@ -20,11 +22,20 @@ pub enum Race {
 
 impl Race {
     pub const fn code(self) -> u8 {
-        match self { Self::Accretia => 0, Self::Bellato => 1, Self::Cora => 2 }
+        match self {
+            Self::Accretia => 0,
+            Self::Bellato => 1,
+            Self::Cora => 2,
+        }
     }
 
     pub const fn from_code(code: u8) -> Option<Self> {
-        match code { 0 => Some(Self::Accretia), 1 => Some(Self::Bellato), 2 => Some(Self::Cora), _ => None }
+        match code {
+            0 => Some(Self::Accretia),
+            1 => Some(Self::Bellato),
+            2 => Some(Self::Cora),
+            _ => None,
+        }
     }
 
     pub const fn prefix(self) -> &'static str {
@@ -104,8 +115,14 @@ pub fn address_matches_public_key(address: &Address, public_key: &PublicKey) -> 
     address_matches_public_key_for_race(address, public_key, address.race())
 }
 
-pub fn address_matches_public_key_for_race(address: &Address, public_key: &PublicKey, race: Race) -> bool {
-    if address.race() != race { return false; }
+pub fn address_matches_public_key_for_race(
+    address: &Address,
+    public_key: &PublicKey,
+    race: Race,
+) -> bool {
+    if address.race() != race {
+        return false;
+    }
     let mut material = Vec::with_capacity(1 + public_key.bytes.len());
     material.extend_from_slice(b"BELLY address v2");
     material.push(race.code());
@@ -145,9 +162,12 @@ pub fn address_to_string(address: &Address, prefix: &str) -> String {
         ADDRESS_PREFIXES.contains(&prefix),
         "unsupported address prefix"
     );
-    assert_eq!(address.race().prefix(), prefix, "address prefix does not match embedded race");
+    assert_eq!(
+        address.race().prefix(),
+        prefix,
+        "address prefix does not match embedded race"
+    );
     let checksum = address_checksum(address);
-
 
     let mut payload = [0_u8; ADDRESS_PAYLOAD_SIZE];
 
@@ -389,8 +409,11 @@ mod tests {
 
     #[test]
     fn all_faction_prefixes_round_trip() {
-        let address = Address([0x5a; ADDRESS_SIZE]);
-        for prefix in ADDRESS_PREFIXES {
+        for race in [Race::Accretia, Race::Bellato, Race::Cora] {
+            let mut bytes = [0x5a; ADDRESS_SIZE];
+            bytes[0] = (bytes[0] & 0x3f) | (race.code() << 6);
+            let address = Address(bytes);
+            let prefix = race.prefix();
             let encoded = address_to_string(&address, prefix);
             assert!(encoded.starts_with(prefix));
             assert_eq!(address_from_string(&encoded, prefix), Ok(address));

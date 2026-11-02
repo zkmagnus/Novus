@@ -9,16 +9,18 @@ pub(super) fn print_balance(args: &[String]) -> Result<(), String> {
     let address = novus::crypto::address_to_string(&raw_address, raw_address.race().prefix());
     let balance: BalanceResponse = http_get_json(rpc, &format!("/balance/{address}"))?;
     let status: NodeStatusResponse = http_get_json(rpc, "/status")?;
+    let native_currency = novus::transaction::Currency::for_race_reward(raw_address.race().into());
 
     println!("Address: {address}");
-    println!("Available: {}", format_amount(balance.total));
+    println!(
+        "Available ({}): {}",
+        format!("{native_currency:?}").to_uppercase(),
+        format_amount(balance.total)
+    );
     for (currency, amount) in &balance.balances {
         println!("{}: {}", currency.to_uppercase(), format_amount(*amount));
     }
     println!("Nonce: {}", balance.nonce);
-    println!("Total Mined: {}", format_amount(status.total_mined));
-    println!("Total Burned: {}", format_amount(status.total_burned));
-    println!("Total Supply: {}", format_amount(status.total_supply));
     for (currency, amount) in status.race_block_rewards {
         println!("Total {currency} block rewards: {amount} atomic units");
     }

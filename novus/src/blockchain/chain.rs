@@ -98,15 +98,24 @@ impl Chain {
         }
 
         let height = self.tip_height.ok_or(ChainError::InvalidHeight)?;
-        let block = self.blocks.remove(&height).ok_or(ChainError::MissingBody)?;
-        self.headers.remove(&height);
-
         let previous_height = height.0.checked_sub(1).map(Height);
-        self.tip_height = previous_height;
-        self.tip_hash = match previous_height.and_then(|previous| self.headers.get(&previous)) {
-            Some(previous) => Some(previous.hash()?),
+        let previous_hash = match previous_height {
+            Some(previous) => Some(
+                self.headers
+                    .get(&previous)
+                    .ok_or(ChainError::InvalidParent)?
+                    .hash()?,
+            ),
             None => None,
         };
+        if !self.blocks.contains_key(&height) || !self.headers.contains_key(&height) {
+            return Err(ChainError::MissingBody);
+        }
+
+        let block = self.blocks.remove(&height).ok_or(ChainError::MissingBody)?;
+        self.headers.remove(&height);
+        self.tip_height = previous_height;
+        self.tip_hash = previous_hash;
 
         Ok(block)
     }

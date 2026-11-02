@@ -1,3 +1,5 @@
+use std::io::Write;
+
 use super::*;
 
 pub(super) fn load_wallet(path: &str) -> Result<LoadedWallet, String> {

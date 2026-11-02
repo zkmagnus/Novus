@@ -1,7 +1,7 @@
 use borsh::{BorshDeserialize, BorshSerialize};
 
 use crypto::{
-    Address, HASH_SIZE, HashDomain, TransactionSignature, PublicKey, TransactionHash,
+    Address, HASH_SIZE, HashDomain, PublicKey, TransactionHash, TransactionSignature,
     address_matches_public_key_for_race, canonical_bytes, domain, verify,
 };
 
@@ -87,7 +87,11 @@ impl Transaction {
     ) -> Result<bool, TransactionEncodingError> {
         let commitment = self.intent.authorization_commitment(chain)?;
 
-        Ok(self.authorization.verify(self.intent.sender, &commitment, &self.authorization.public_key))
+        Ok(self.authorization.verify(
+            self.intent.sender,
+            &commitment,
+            &self.authorization.public_key,
+        ))
     }
 
     pub fn transaction_id(&self) -> Result<TransactionHash, TransactionEncodingError> {

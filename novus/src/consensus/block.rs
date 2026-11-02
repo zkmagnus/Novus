@@ -1,13 +1,13 @@
 use crate::{
     blockchain::{Block, Chain},
     consensus::{
-        ConsensusError, PoWTarget, ValidatedEmission, authorize_emission,
-        expected_difficulty_for_height, verify_pow,
+        ConsensusError, MEDIAN_TIME_PAST_WINDOW, PoWTarget, ValidatedEmission, authorize_emission,
+        expected_difficulty_for_height, unix_time_now, validate_timestamp, verify_pow,
     },
 };
 use common::Height;
 
-use crypto::{BlockHash, HASH_SIZE, Hash, PoWHash, PoWMemory};
+use crypto::{BlockHash, HASH_SIZE, Hash, PoWHash};
 
 pub const GENESIS_TARGET_BITS: u32 = crate::blockchain::GENESIS_TARGET_BITS;
 
@@ -107,6 +107,21 @@ fn validate_for_apply(
         })?;
 
     if !block.is_genesis() {
+        let first_height = block
+            .height()
+            .0
+            .saturating_sub(MEDIAN_TIME_PAST_WINDOW as u64);
+        let previous_timestamps = (first_height..block.height().0)
+            .map(|height| {
+                chain
+                    .block(&Height(height))
+                    .map(Block::timestamp)
+                    .ok_or(ConsensusError::InvalidPreviousHash)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        validate_timestamp(block.timestamp(), &previous_timestamps, unix_time_now())
+            .map_err(ConsensusError::InvalidTimestamp)?;
+
         let expected_difficulty = expected_difficulty(chain, block.height())?;
 
         if enforce_pow {
@@ -329,13 +344,5 @@ impl Consensus {
 
     pub fn pow_hash(&self, block: &Block) -> Result<PoWHash, ConsensusError> {
         crate::consensus::calculate_work(&block.header)
-    }
-
-    pub fn pow_hash_with_memory(
-        &self,
-        block: &Block,
-        memory: &mut PoWMemory,
-    ) -> Result<PoWHash, ConsensusError> {
-        crate::consensus::calculate_work_with_memory(&block.header, memory)
     }
 }

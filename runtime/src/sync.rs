@@ -1,11 +1,10 @@
 use std::{error::Error, fmt};
 
-use novus::{consensus::HeaderAtHeight, crypto::canonical_decode};
 use borsh::{BorshDeserialize, BorshSerialize};
+use novus::{consensus::HeaderAtHeight, crypto::canonical_decode};
 
-/// Keep verified-header batches small enough that Argon2id validation finishes
-/// before the peer session read timeout and naturally provides regular
-/// request/response progress on long catch-up sessions.
+/// Keep verified-header batches bounded and provide regular request/response
+/// progress on long catch-up sessions.
 pub const MAX_HEADER_CHAIN_CHUNK_HEADERS: usize = 32;
 pub const MAX_HEADER_CHAIN_CHUNK_SIZE: usize = 1024 * 1024;
 

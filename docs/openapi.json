@@ -1,23 +1,200 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "novus Node RPC",
-    "version": "0.1.0"
+    "title": "Novus Node RPC",
+    "version": "0.1.0",
+    "description": "HTTP API for querying a Novus node and submitting signed transactions. Coin amounts in JSON responses are atomic units; wallet CLI amounts are coin units with up to 6 decimal places. One whole coin equals 1,000,000 atomic units."
   },
+  "servers": [
+    { "url": "http://127.0.0.1:10593", "description": "Default local RPC listener" }
+  ],
   "paths": {
-    "/status": { "get": { "summary": "Get node and chain status", "responses": { "200": { "description": "Node status with finalized_height and total_mined, total_burned, and total_supply in the account race currency" } } } },
-    "/fee-policy": { "get": { "summary": "Get relay fee, protocol transfer tax, and block reward policy", "responses": { "200": { "description": "Fee rate is denominated in atomic units; fees use sender race currency and are claimed by a matching-race miner. Protocol tax is separate." } } } },
-    "/transaction": { "post": { "summary": "Submit a canonical Borsh transaction", "requestBody": { "required": true, "content": { "application/octet-stream": { "schema": { "type": "string", "contentEncoding": "binary" } } } }, "responses": { "200": { "description": "Accepted transaction ID" }, "400": { "description": "Invalid transaction" } } } },
-    "/balance/{address}": { "get": { "summary": "Get account balance and next nonce", "parameters": [{ "$ref": "#/components/parameters/Address" }], "responses": { "200": { "description": "Account balance and next mempool nonce in the account race currency" } } } },
-    "/account/{address}": { "get": { "summary": "Get account state", "parameters": [{ "$ref": "#/components/parameters/Address" }], "responses": { "200": { "description": "Account balances and nonce" } } } },
-    "/blocks/latest": { "get": { "summary": "Get latest blocks", "responses": { "200": { "description": "Blocks" } } } },
-    "/block/{height}": { "get": { "summary": "Get block by height", "parameters": [{ "name": "height", "in": "path", "required": true, "schema": { "type": "integer", "format": "uint64" } }], "responses": { "200": { "description": "Block" } } } },
-    "/explorer/address/{address}": { "get": { "summary": "Get address activity", "parameters": [{ "$ref": "#/components/parameters/Address" }], "responses": { "200": { "description": "Address activity" } } } },
-    "/explorer/transaction/{transaction_id}": { "get": { "summary": "Get confirmed transaction", "parameters": [{ "name": "transaction_id", "in": "path", "required": true, "schema": { "type": "string", "pattern": "^[0-9a-f]{64}$" } }], "responses": { "200": { "description": "Transaction" } } } }
+    "/status": {
+      "get": {
+        "operationId": "getNodeStatus",
+        "summary": "Get node and chain status",
+        "responses": {
+          "200": {
+            "description": "Node status, chain height, supply, and race block rewards",
+            "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } }
+          }
+        }
+      }
+    },
+    "/fee-policy": {
+      "get": {
+        "operationId": "getFeePolicy",
+        "summary": "Get relay fee, transfer tax, exchange, and block reward policy",
+        "responses": {
+          "200": {
+            "description": "Chip War tax adjustments for the sender's race apply to every taxable transaction type. Base rates: race-currency transfer 1%, race-to-Gold conversion 5%, Gold transfer 2% and Gold-to-race conversion 5%, Gold-to-Novus conversion 10%. The modifier starts at 0 percentage points. Each settlement adds 2 points for a loss, adds 1 for a failure, and subtracts 1 for a win only when the modifier is above zero. Effective tax is the base rate plus the modifier, capped at 20%, and never below the base rate. Tax and conversion relay fees are paid in the source currency. Gold transfers are restricted to accounts of the sender's race. Novus transfers are global, tax-exempt, and pay only the Novus relay fee; that fee is credited directly to the miner of the block containing the transaction, regardless of miner race. Gold relay fees remain claimable through the tax vault. Gold converts one way at 1,000 Gold to 1 Novus; reverse conversion is unavailable.",
+            "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } }
+          }
+        }
+      }
+    },
+    "/transaction": {
+      "post": {
+        "operationId": "submitTransaction",
+        "summary": "Submit a signed canonical Borsh transaction",
+        "description": "Transactions sign an explicit tax amount in the source currency. The node recalculates the tax from current consensus rules and rejects stale or incorrect values. The wallet command `wallet send` builds, signs, and submits transactions here. To submit a transaction created offline, decode its hex to bytes and POST those bytes with Content-Type application/octet-stream.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": { "type": "string", "contentEncoding": "binary" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Transaction accepted into the node mempool",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SubmitTransactionResponse" },
+                "example": { "hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" }
+              }
+            }
+          },
+          "400": { "description": "Malformed or invalid transaction" }
+        }
+      }
+    },
+    "/balance/{address}": {
+      "get": {
+        "operationId": "getBalance",
+        "summary": "Get account balance and next usable nonce",
+        "description": "Returns confirmed balances in atomic units. The nonce advances past contiguous transactions already in the mempool.",
+        "parameters": [{ "$ref": "#/components/parameters/Address" }],
+        "responses": {
+          "200": {
+            "description": "Account balances and next nonce",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/BalanceResponse" },
+                "example": {
+                  "address": "RACE_ADDRESS",
+                  "tip_height": 123,
+                  "total": 125000000,
+                  "available": 125000000,
+                  "balances": { "cp": 125000000 },
+                  "nonce": 4,
+                  "reserved": 0,
+                  "immature": 0
+                }
+              }
+            }
+          },
+          "400": { "description": "Invalid address" }
+        }
+      }
+    },
+    "/account/{address}": {
+      "get": {
+        "operationId": "getAccount",
+        "summary": "Get account state",
+        "parameters": [{ "$ref": "#/components/parameters/Address" }],
+        "responses": {
+          "200": {
+            "description": "Account balances and confirmed nonce",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AccountResponse" } } }
+          },
+          "400": { "description": "Invalid address" }
+        }
+      }
+    },
+    "/race/{address}": {
+      "get": {
+        "operationId": "getAccountRace",
+        "summary": "Get the race assigned to an account",
+        "parameters": [{ "$ref": "#/components/parameters/Address" }],
+        "responses": {
+          "200": {
+            "description": "Race assignment, or null if the account has not registered",
+            "content": { "application/json": { "schema": { "type": "object", "required": ["race"], "properties": { "race": { "type": ["string", "null"], "enum": ["accretia", "bellato", "cora", null] } } } } }
+          },
+          "400": { "description": "Invalid address" }
+        }
+      }
+    },
+    "/blocks/latest": {
+      "get": {
+        "operationId": "getLatestBlocks",
+        "summary": "Get latest blocks",
+        "responses": { "200": { "description": "Latest canonical blocks", "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } } } }
+      }
+    },
+    "/block/{height}": {
+      "get": {
+        "operationId": "getBlock",
+        "summary": "Get block by height",
+        "parameters": [{ "name": "height", "in": "path", "required": true, "schema": { "type": "integer", "format": "uint64", "minimum": 0 } }],
+        "responses": {
+          "200": { "description": "Canonical block", "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } } },
+          "404": { "description": "Block was not found" }
+        }
+      }
+    },
+    "/explorer/address/{address}": {
+      "get": {
+        "operationId": "getAddressActivity",
+        "summary": "Get paginated address activity",
+        "parameters": [
+          { "$ref": "#/components/parameters/Address" },
+          { "name": "include_emissions", "in": "query", "required": false, "schema": { "type": "boolean", "default": true } },
+          { "name": "limit", "in": "query", "required": false, "schema": { "type": "integer", "minimum": 1, "maximum": 250, "default": 50 } },
+          { "name": "before", "in": "query", "required": false, "description": "Opaque cursor returned by the previous page", "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "Address balances and activity page", "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } } } }
+      }
+    },
+    "/explorer/transaction/{transaction_id}": {
+      "get": {
+        "operationId": "getConfirmedTransaction",
+        "summary": "Get confirmed transaction",
+        "parameters": [{ "name": "transaction_id", "in": "path", "required": true, "schema": { "type": "string", "pattern": "^[0-9a-f]{64}$" } }],
+        "responses": {
+          "200": { "description": "Confirmed transaction", "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } } },
+          "404": { "description": "Transaction was not found" }
+        }
+      }
+    }
   },
   "components": {
     "parameters": {
-      "Address": { "name": "address", "in": "path", "required": true, "schema": { "type": "string" } }
+      "Address": { "name": "address", "in": "path", "required": true, "description": "Novus race-prefixed account address", "schema": { "type": "string", "minLength": 1 } }
+    },
+    "schemas": {
+      "BalanceResponse": {
+        "type": "object",
+        "required": ["address", "tip_height", "total", "available", "balances", "nonce", "reserved", "immature"],
+        "properties": {
+          "address": { "type": "string" },
+          "tip_height": { "type": "integer", "format": "uint64" },
+          "total": { "type": "integer", "format": "uint128", "description": "Total confirmed balance in atomic units" },
+          "available": { "type": "integer", "format": "uint128", "description": "Spendable confirmed balance in atomic units" },
+          "balances": { "type": "object", "additionalProperties": { "type": "integer", "format": "uint128" }, "description": "Balances by currency code (cp, dalant, disena, gold, novus), in atomic units" },
+          "nonce": { "type": "integer", "format": "uint64", "description": "Next nonce, accounting for contiguous mempool transactions" },
+          "reserved": { "type": "integer", "format": "uint128" },
+          "immature": { "type": "integer", "format": "uint128" }
+        }
+      },
+      "AccountResponse": {
+        "type": "object",
+        "required": ["address", "tip_height", "balance", "balances", "nonce"],
+        "properties": {
+          "address": { "type": "string" },
+          "tip_height": { "type": "integer", "format": "uint64" },
+          "balance": { "type": "integer", "format": "uint128" },
+          "balances": { "type": "object", "additionalProperties": { "type": "integer", "format": "uint128" } },
+          "nonce": { "type": "integer", "format": "uint64" }
+        }
+      },
+      "SubmitTransactionResponse": {
+        "type": "object",
+        "required": ["hash"],
+        "properties": { "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Transaction ID" } }
+      }
     }
   }
 }

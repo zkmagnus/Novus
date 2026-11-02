@@ -1,18 +1,19 @@
 use super::*;
 use super::{config::*, gossip::*, mempool::*, state::*, util::*};
+use novus::consensus::{MEDIAN_TIME_PAST_WINDOW, reward_for_previous_hash, validate_timestamp};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(super) fn mining_loop(database: PathBuf, miner: Address) {
     let mut next_nonce = 0_u64;
-    let mut memory = new_pow_memory();
     println!("mining_state: ready");
     loop {
-        match mine_block_database(&database, miner, next_nonce, 1_000_000, &mut memory) {
+        match mine_block_database(&database, miner, next_nonce, 1_000_000) {
             Ok(MiningAttempt::Mined) => next_nonce = 0,
             Ok(MiningAttempt::Exhausted { next }) => next_nonce = next,
             Err(error) => {
                 next_nonce = 0;
                 eprintln!("node: mining attempt failed: {error}");
+                std::thread::sleep(Duration::from_secs(5));
             }
         }
     }
@@ -28,7 +29,6 @@ pub(super) fn mine_block_database(
     miner: Address,
     start_nonce: u64,
     attempts: u64,
-    memory: &mut PoWMemory,
 ) -> Result<MiningAttempt, String> {
     let ledger = load_or_initialize(database)?;
     let mempool = read_mempool(database)?;
@@ -45,7 +45,6 @@ pub(super) fn mine_block_database(
             start_nonce,
             attempts,
         },
-        memory,
     )
     .map_err(|error| error.to_string())?;
     if found.is_none() {
@@ -83,9 +82,8 @@ pub(super) fn mine_one_block(path: Option<&str>, miner: &str) -> Result<(), Stri
     let ledger = load_or_initialize(&database)?;
     let miner = resolve_miner(&ledger, miner)?;
     let mut next_nonce = 0_u64;
-    let mut memory = new_pow_memory();
     loop {
-        match mine_block_database(&database, miner, next_nonce, 1_000_000, &mut memory)? {
+        match mine_block_database(&database, miner, next_nonce, 1_000_000)? {
             MiningAttempt::Mined => return Ok(()),
             MiningAttempt::Exhausted { next } => next_nonce = next,
         }
@@ -101,7 +99,7 @@ pub(super) fn select_block_transactions(
     for transaction in mempool {
         let mut candidate = selected.clone();
         candidate.push(transaction.clone());
-        let block = candidate_block(ledger, miner, candidate.clone())?;
+        let block = candidate_block_uncommitted(ledger, miner, candidate.clone())?;
         if block.block_size() as usize > novus::blockchain::MAX_BLOCK_SIZE {
             break;
         }
@@ -111,6 +109,22 @@ pub(super) fn select_block_transactions(
 }
 
 pub(super) fn candidate_block(
+    ledger: &Ledger,
+    miner: Address,
+    transactions: Vec<Transaction>,
+) -> Result<Block, String> {
+    let mut block = candidate_block_uncommitted(ledger, miner, transactions)?;
+    let (state_root, block_size) = ledger
+        .preview_block_commitments(&block)
+        .map_err(|error| error.to_string())?;
+
+    block.set_state_root(state_root);
+    block.set_block_size(block_size);
+
+    Ok(block)
+}
+
+fn candidate_block_uncommitted(
     ledger: &Ledger,
     miner: Address,
     transactions: Vec<Transaction>,
@@ -127,12 +141,28 @@ pub(super) fn candidate_block(
 
     let subsidy = expected_next_emission(ledger)?;
 
-    let timestamp = SystemTime::now()
+    let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| "system clock is before Unix epoch")?
         .as_secs();
+    let previous_timestamps = ledger
+        .chain
+        .blocks()
+        .rev()
+        .take(MEDIAN_TIME_PAST_WINDOW)
+        .map(Block::timestamp)
+        .collect::<Vec<_>>();
+    let mut ordered_timestamps = previous_timestamps.clone();
+    ordered_timestamps.sort_unstable();
+    let median_time_past = ordered_timestamps
+        .get(ordered_timestamps.len() / 2)
+        .copied()
+        .unwrap_or_default();
+    let timestamp = now.max(median_time_past.saturating_add(1));
+    validate_timestamp(timestamp, &previous_timestamps, now)
+        .map_err(|error| format!("cannot create mining candidate: {error}"))?;
 
-    let mut block = Block::from_protocol_transactions(
+    Block::from_protocol_transactions(
         height,
         previous,
         difficulty,
@@ -141,23 +171,9 @@ pub(super) fn candidate_block(
         Some(Emission::new(miner, subsidy)),
         transactions,
     )
-    .map_err(|error| error.to_string())?;
-
-    let (state_root, block_size) = ledger
-        .preview_block_commitments(&block)
-        .map_err(|error| error.to_string())?;
-
-    block.set_state_root(state_root);
-    block.set_block_size(block_size);
-
-    Ok(block)
+    .map_err(|error| error.to_string())
 }
 pub(super) fn expected_next_emission(ledger: &Ledger) -> Result<Amount, String> {
-    let height = Height(
-        ledger
-            .tip_height()
-            .map_or(0, |height| height.0.saturating_add(1)),
-    );
-
-    Ok(expected_emission_for_height(height))
+    let previous = ledger.tip_hash().ok_or("canonical genesis is missing")?;
+    Ok(reward_for_previous_hash(previous.0))
 }

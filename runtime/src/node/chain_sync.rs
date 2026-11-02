@@ -22,8 +22,6 @@ pub(super) fn synchronize_headers(
         .collect::<Vec<_>>();
 
     let mut verified_headers = 0_usize;
-    let mut pow_memory = None;
-
     loop {
         write_frame(stream, &encode_locator(&request_locator)?)?;
 
@@ -119,12 +117,8 @@ pub(super) fn synchronize_headers(
             ancestor_hash = Some(ancestor);
         }
 
-        let advanced = novus::consensus::advance_header_validation_state_with_memory(
-            &current,
-            &chunk.headers,
-            pow_memory.get_or_insert_with(new_pow_memory),
-        )
-        .map_err(map_peer_header_error)?;
+        let advanced = novus::consensus::advance_header_validation_state(&current, &chunk.headers)
+            .map_err(map_peer_header_error)?;
 
         verified_headers = verified_headers
             .checked_add(chunk.headers.len())
@@ -396,14 +390,13 @@ pub(super) fn ledger_header_state_at_height(
             .block(&height)
             .ok_or("canonical block is missing after checkpoint")?;
 
-        let block_work =
-            novus::consensus::block_work(block.target_bits()).ok_or_else(|| {
-                format!(
-                    "invalid target bits {:08x} at height {}",
-                    block.target_bits(),
-                    height.0,
-                )
-            })?;
+        let block_work = novus::consensus::block_work(block.target_bits()).ok_or_else(|| {
+            format!(
+                "invalid target bits {:08x} at height {}",
+                block.target_bits(),
+                height.0,
+            )
+        })?;
 
         cumulative_work = cumulative_work.saturating_add(block_work);
 
@@ -488,12 +481,9 @@ pub(super) fn decode_locator(bytes: &[u8]) -> Result<Vec<[u8; 32]>, String> {
     if count == 0 || count > MAX_LOCATOR_HASHES || bytes.len() != 2 + count * 32 {
         return Err("invalid header locator size".into());
     }
-    bytes[2..]
-        .chunks_exact(32)
-        .map(|chunk| {
-            chunk
-                .try_into()
-                .map_err(|_| "invalid locator hash".to_string())
-        })
-        .collect()
+    let (hashes, remainder) = bytes[2..].as_chunks::<32>();
+    if !remainder.is_empty() {
+        return Err("invalid header locator size".into());
+    }
+    Ok(hashes.to_vec())
 }

@@ -1,11 +1,11 @@
+use bip39::{Language, Mnemonic};
 use novus::{
     crypto::{
-        Address, PublicKey, Signature, SigningSeed, address_from_public_key_for_race, address_from_string_for_race,
-        address_to_string, hash_bytes,
+        Address, PublicKey, Signature, SigningSeed, address_from_public_key_for_race,
+        address_from_string_for_race, address_to_string, hash_bytes,
     },
-    transaction::{AccountIntent, TransactionAuthorization, Transaction},
+    transaction::{AccountIntent, Transaction, TransactionAuthorization},
 };
-use bip39::{Language, Mnemonic};
 
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
@@ -85,8 +85,9 @@ pub fn wallet_from_file_bytes(bytes: &[u8]) -> Result<Wallet, String> {
         .parse::<Signature>()
         .map_err(str::to_string)?;
     let stored_address = address_from_string_for_race(&wallet_file.address)
-    .map_err(|error| format!("invalid wallet address: {error}"))?;
-    let mut wallet = wallet_from_bip39_mnemonic_for_race(&wallet_file.mnemonic, scheme, stored_address.race())?;
+        .map_err(|error| format!("invalid wallet address: {error}"))?;
+    let mut wallet =
+        wallet_from_bip39_mnemonic_for_race(&wallet_file.mnemonic, scheme, stored_address.race())?;
     if wallet.address != stored_address {
         return Err("wallet address does not match its mnemonic and signature scheme".to_string());
     }
@@ -132,10 +133,7 @@ pub fn generate_bip39_mnemonic(words: usize) -> Result<Zeroizing<String>, String
     encode_bip39_mnemonic(&entropy).map(Zeroizing::new)
 }
 
-pub fn wallet_from_bip39_mnemonic(
-    phrase: &str,
-    scheme: Signature,
-) -> Result<Wallet, String> {
+pub fn wallet_from_bip39_mnemonic(phrase: &str, scheme: Signature) -> Result<Wallet, String> {
     wallet_from_bip39_mnemonic_for_race(phrase, scheme, novus::crypto::Race::Accretia)
 }
 
@@ -205,7 +203,10 @@ impl Wallet {
             public_key: self.public_key.clone(),
             signature,
         };
-        Ok(Transaction { intent, authorization })
+        Ok(Transaction {
+            intent,
+            authorization,
+        })
     }
 }
 
@@ -274,10 +275,8 @@ mod tests {
     fn mnemonic_derives_distinct_recoverable_nakama_addresses() {
         let mnemonic = encode_bip39_mnemonic(&[12; BIP39_MNEMONIC_12_ENTROPY_BYTES]).unwrap();
         let nakamas = [Signature::Schnorr];
-        let first =
-            nakamas.map(|nakama| wallet_from_bip39_mnemonic(&mnemonic, nakama).unwrap());
-        let second =
-            nakamas.map(|nakama| wallet_from_bip39_mnemonic(&mnemonic, nakama).unwrap());
+        let first = nakamas.map(|nakama| wallet_from_bip39_mnemonic(&mnemonic, nakama).unwrap());
+        let second = nakamas.map(|nakama| wallet_from_bip39_mnemonic(&mnemonic, nakama).unwrap());
         for (left, right) in first.iter().zip(&second) {
             assert_eq!(left.address, right.address);
         }
@@ -291,7 +290,8 @@ mod tests {
     #[test]
     fn nakama_wallet_file_roundtrip_preserves_nakama_and_identity() {
         let mnemonic = encode_bip39_mnemonic(&[13; BIP39_MNEMONIC_12_ENTROPY_BYTES]).unwrap();
-        for nakama in [Signature::Schnorr] {
+        {
+            let nakama = Signature::Schnorr;
             let mut wallet = wallet_from_bip39_mnemonic(&mnemonic, nakama).unwrap();
             wallet.mnemonic = Some(mnemonic.clone());
             let bytes = wallet_file_bytes(&wallet).unwrap();

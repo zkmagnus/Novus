@@ -1,5 +1,5 @@
-use crypto::Address;
 use crate::transaction::Amount;
+use crypto::Address;
 
 use crate::{
     consensus::ValidatedTransaction,
@@ -20,12 +20,15 @@ impl LedgerState {
         let (taxes, tax_vault) = self.tax_vault.claim_for_race(race);
         let accounts = self.accounts.checkpoint([recipient]);
         let credit_result = (|| {
-            self.accounts.credit_race_reward(recipient, currency, subsidy)?;
+            self.accounts
+                .credit_race_reward(recipient, currency, subsidy)?;
             for (tax_currency, amount) in &taxes {
                 if tax_currency.required_race().is_some() {
-                    self.accounts.credit_race_reward(recipient, *tax_currency, *amount)?;
+                    self.accounts
+                        .credit_race_reward(recipient, *tax_currency, *amount)?;
                 } else {
-                    self.accounts.credit_currency(recipient, *tax_currency, *amount)?;
+                    self.accounts
+                        .credit_currency(recipient, *tax_currency, *amount)?;
                 }
             }
             Ok::<(), crate::ledger::AccountError>(())
@@ -35,23 +38,35 @@ impl LedgerState {
             self.tax_vault.rollback(tax_vault);
             return Err(error.into());
         }
-        let prior = self.novus.race_rewards.get(&currency).copied().unwrap_or(Amount::ZERO);
+        let Some(total_mined) = self.novus.total_mined.checked_add(subsidy) else {
+            self.accounts.rollback(accounts);
+            self.tax_vault.rollback(tax_vault);
+            return Err(StateError::AmountOverflow);
+        };
+        let prior = self
+            .novus
+            .race_rewards
+            .get(&currency)
+            .copied()
+            .unwrap_or(Amount::ZERO);
         let Some(total) = prior.checked_add(subsidy) else {
             self.accounts.rollback(accounts);
             self.tax_vault.rollback(tax_vault);
             return Err(StateError::AmountOverflow);
         };
+        self.novus.total_mined = total_mined;
         self.novus.race_rewards.insert(currency, total);
         Ok(StateRollbackJournal {
             account: Some(AccountRollbackJournal {
                 accounts,
-                mined: Amount::ZERO,
+                mined: subsidy,
                 burned: Amount::ZERO,
                 race_reward: Some((currency, subsidy)),
             }),
             tax_vault: Some(tax_vault),
             exchange_vault: None,
             chip_war: None,
+            global_currency: None,
         })
     }
 
@@ -59,34 +74,139 @@ impl LedgerState {
         &mut self,
         transaction: &ValidatedTransaction,
     ) -> Result<StateRollbackJournal, StateError> {
-        let register_race = transaction.intent.register_race.then_some(transaction.intent.race);
+        self.apply_validated_transaction_with_miner(transaction, None)
+    }
+
+    pub(crate) fn apply_validated_transaction_with_miner(
+        &mut self,
+        transaction: &ValidatedTransaction,
+        miner: Option<Address>,
+    ) -> Result<StateRollbackJournal, StateError> {
+        let register_race = transaction
+            .intent
+            .register_race
+            .then_some(transaction.intent.race);
         let mut exchange_vault_journal = None;
+        let mut global_currency_journal = None;
         let account_result = if let Some(conversion) = transaction.intent.conversion {
-            let rate = self.chip_war.exchange_rate(transaction.intent.race);
-            if conversion.quote_rate != rate { return Err(StateError::InvalidTransaction); }
-            let output = crate::transaction::exchange_output_amount(
-                conversion.amount.as_atomic(),
-                conversion.from == crate::transaction::Currency::Gold,
-                rate,
-            ).map(Amount::from_atomic).ok_or(StateError::InvalidTransaction)?;
-            let (to, output, additions, removals) = if conversion.from == crate::transaction::Currency::Gold {
-                let to = crate::transaction::Currency::for_race_reward(transaction.intent.race);
-                let mut additions = std::collections::BTreeMap::new();
-                additions.insert(crate::transaction::Currency::Gold, conversion.amount);
-                let mut removals = std::collections::BTreeMap::new();
-                removals.insert(to, output);
-                (to, output, additions, removals)
+            let rate = if (conversion.from, conversion.to)
+                == (
+                    crate::transaction::Currency::Gold,
+                    crate::transaction::Currency::Novus,
+                ) {
+                crate::transaction::GOLD_PER_NOVUS
             } else {
-                let held_gold = self.exchange_vault.balance(crate::transaction::Currency::Gold).as_atomic().min(output.as_atomic());
-                let mut additions = std::collections::BTreeMap::new();
-                additions.insert(conversion.from, conversion.amount);
-                let mut removals = std::collections::BTreeMap::new();
-                if held_gold > 0 { removals.insert(crate::transaction::Currency::Gold, Amount::from_atomic(held_gold)); }
-                (crate::transaction::Currency::Gold, output, additions, removals)
+                self.chip_war.exchange_rate(transaction.intent.race)
             };
-            let vault_journal = self.exchange_vault.adjust(&additions, &removals)
+            if conversion.quote_rate != rate {
+                return Err(StateError::InvalidTransaction);
+            }
+            let output = crate::transaction::conversion_output_amount(
+                conversion.amount.as_atomic(),
+                conversion.from,
+                conversion.to,
+                rate,
+            )
+            .map(Amount::from_atomic)
+            .ok_or(StateError::InvalidTransaction)?;
+            let (to, output, additions, removals) =
+                if conversion.from == crate::transaction::Currency::Gold {
+                    let mut additions = std::collections::BTreeMap::new();
+                    let mut removals = std::collections::BTreeMap::new();
+                    if conversion.to != crate::transaction::Currency::Novus {
+                        additions.insert(crate::transaction::Currency::Gold, conversion.amount);
+                        removals.insert(conversion.to, output);
+                    }
+                    (conversion.to, output, additions, removals)
+                } else {
+                    let held_gold = self
+                        .exchange_vault
+                        .balance(crate::transaction::Currency::Gold)
+                        .as_atomic()
+                        .min(output.as_atomic());
+                    let mut additions = std::collections::BTreeMap::new();
+                    additions.insert(conversion.from, conversion.amount);
+                    let mut removals = std::collections::BTreeMap::new();
+                    if held_gold > 0 {
+                        removals.insert(
+                            crate::transaction::Currency::Gold,
+                            Amount::from_atomic(held_gold),
+                        );
+                    }
+                    (
+                        crate::transaction::Currency::Gold,
+                        output,
+                        additions,
+                        removals,
+                    )
+                };
+            let vault_journal = self
+                .exchange_vault
+                .adjust(&additions, &removals)
                 .ok_or(StateError::AmountOverflow)?;
             exchange_vault_journal = Some(vault_journal);
+            if (conversion.from, conversion.to)
+                == (
+                    crate::transaction::Currency::Gold,
+                    crate::transaction::Currency::Novus,
+                )
+            {
+                let previous = self.global_currency.clone();
+                let Some(total_burned) = previous.total_gold_burned.checked_add(conversion.amount)
+                else {
+                    self.exchange_vault
+                        .rollback(exchange_vault_journal.take().expect("journal was set"));
+                    return Err(StateError::AmountOverflow);
+                };
+                let Some(total_novus) = previous.total_novus_minted.checked_add(output) else {
+                    self.exchange_vault
+                        .rollback(exchange_vault_journal.take().expect("journal was set"));
+                    return Err(StateError::AmountOverflow);
+                };
+                let Some(cycle_total) = previous
+                    .gold_converted_this_cycle
+                    .checked_add(conversion.amount)
+                else {
+                    self.exchange_vault
+                        .rollback(exchange_vault_journal.take().expect("journal was set"));
+                    return Err(StateError::AmountOverflow);
+                };
+                let cap = crate::ledger::GOLD_SUPPLY_CAP.as_atomic();
+                let refills = cycle_total.as_atomic() / cap;
+                let remainder = cycle_total.as_atomic() % cap;
+                self.global_currency.total_gold_burned = total_burned;
+                self.global_currency.total_novus_minted = total_novus;
+                self.global_currency.gold_converted_this_cycle = Amount::from_atomic(remainder);
+                if refills > 0 {
+                    let Some(refill) = cap.checked_mul(refills).map(Amount::from_atomic) else {
+                        self.exchange_vault
+                            .rollback(exchange_vault_journal.take().expect("journal was set"));
+                        self.global_currency = previous;
+                        return Err(StateError::AmountOverflow);
+                    };
+                    let additions = std::collections::BTreeMap::from([(
+                        crate::transaction::Currency::Gold,
+                        refill,
+                    )]);
+                    let Some(refill_journal) =
+                        self.exchange_vault.adjust(&additions, &Default::default())
+                    else {
+                        self.exchange_vault
+                            .rollback(exchange_vault_journal.take().expect("journal was set"));
+                        self.global_currency = previous;
+                        return Err(StateError::AmountOverflow);
+                    };
+                    // Combine both vault mutations into one rollback record by preserving the
+                    // original Gold balance from before conversion and refill.
+                    let original = exchange_vault_journal.take().expect("journal was set");
+                    let mut before = original.before;
+                    for (currency, amount) in refill_journal.before {
+                        before.entry(currency).or_insert(amount);
+                    }
+                    exchange_vault_journal = Some(crate::ledger::ExchangeVaultRollback { before });
+                }
+                global_currency_journal = Some(crate::ledger::GlobalCurrencyRollback { previous });
+            }
             self.accounts.exchange_currency(
                 transaction.intent.sender,
                 transaction.intent.nonce,
@@ -96,6 +216,7 @@ impl LedgerState {
                 to,
                 output,
                 transaction.intent.fee,
+                transaction.intent.fee_currency(),
                 register_race,
             )
         } else {
@@ -105,31 +226,74 @@ impl LedgerState {
                 &transaction.intent.transfers,
                 &transaction.taxes,
                 transaction.intent.fee,
+                transaction.intent.fee_currency(),
                 register_race,
             )
         };
-        let accounts = match account_result {
+        let mut accounts = match account_result {
             Ok(journal) => journal,
             Err(error) => {
-                if let Some(journal) = exchange_vault_journal.take() { self.exchange_vault.rollback(journal); }
+                if let Some(journal) = exchange_vault_journal.take() {
+                    self.exchange_vault.rollback(journal);
+                }
+                if let Some(journal) = global_currency_journal.take() {
+                    self.global_currency = journal.previous;
+                }
                 return Err(error.into());
             }
         };
+        let fee_currency = transaction.intent.fee_currency();
+        if fee_currency == crate::transaction::Currency::Novus
+            && let Some(miner) = miner
+            && let Err(error) = self.accounts.credit_currency_with_journal(
+                miner,
+                crate::transaction::Currency::Novus,
+                transaction.intent.fee,
+                &mut accounts,
+            )
+        {
+            self.accounts.rollback(accounts);
+            if let Some(journal) = exchange_vault_journal.take() {
+                self.exchange_vault.rollback(journal);
+            }
+            if let Some(journal) = global_currency_journal.take() {
+                self.global_currency = journal.previous;
+            }
+            return Err(error.into());
+        }
         let mut vault_credit = transaction.taxes.clone();
-        let fee_currency = crate::transaction::Currency::for_race_reward(transaction.intent.race);
-        let current_fee_currency_tax = vault_credit.get(&fee_currency).copied().unwrap_or(Amount::ZERO);
-        let total_fee_currency_tax = current_fee_currency_tax.checked_add(transaction.intent.fee)
-            .ok_or_else(|| {
-                self.accounts.rollback(accounts.clone());
-                if let Some(journal) = exchange_vault_journal.take() { self.exchange_vault.rollback(journal); }
-                StateError::AmountOverflow
-            })?;
-        if !total_fee_currency_tax.is_zero() { vault_credit.insert(fee_currency, total_fee_currency_tax); }
+        let fee_in_vault = fee_currency != crate::transaction::Currency::Novus;
+        if fee_in_vault {
+            let current_fee_currency_tax = vault_credit
+                .get(&fee_currency)
+                .copied()
+                .unwrap_or(Amount::ZERO);
+            let Some(total_fee_currency_tax) =
+                current_fee_currency_tax.checked_add(transaction.intent.fee)
+            else {
+                self.accounts.rollback(accounts);
+                if let Some(journal) = exchange_vault_journal.take() {
+                    self.exchange_vault.rollback(journal);
+                }
+                if let Some(journal) = global_currency_journal.take() {
+                    self.global_currency = journal.previous;
+                }
+                return Err(StateError::AmountOverflow);
+            };
+            if !total_fee_currency_tax.is_zero() {
+                vault_credit.insert(fee_currency, total_fee_currency_tax);
+            }
+        }
         let tax_vault = match self.tax_vault.credit(&vault_credit) {
             Some(journal) => journal,
             None => {
                 self.accounts.rollback(accounts);
-                if let Some(journal) = exchange_vault_journal.take() { self.exchange_vault.rollback(journal); }
+                if let Some(journal) = exchange_vault_journal.take() {
+                    self.exchange_vault.rollback(journal);
+                }
+                if let Some(journal) = global_currency_journal.take() {
+                    self.global_currency = journal.previous;
+                }
                 return Err(StateError::AmountOverflow);
             }
         };
@@ -144,6 +308,7 @@ impl LedgerState {
             tax_vault: Some(tax_vault),
             exchange_vault: exchange_vault_journal,
             chip_war: None,
+            global_currency: global_currency_journal,
         })
     }
 
@@ -152,15 +317,23 @@ impl LedgerState {
         height: u64,
         miner_race: crate::transaction::Race,
     ) -> Result<StateRollbackJournal, StateError> {
-        let journal = self.chip_war.record_block(height, miner_race)
+        let journal = self
+            .chip_war
+            .record_block(height, miner_race)
             .ok_or(StateError::AmountOverflow)?;
-        Ok(StateRollbackJournal { chip_war: Some(journal), ..StateRollbackJournal::default() })
+        Ok(StateRollbackJournal {
+            chip_war: Some(journal),
+            ..StateRollbackJournal::default()
+        })
     }
 
     pub(crate) fn rollback_state(
         &mut self,
         journal: StateRollbackJournal,
     ) -> Result<(), StateError> {
+        if let Some(account) = journal.account {
+            self.rollback_account(account)?;
+        }
         if let Some(tax_vault) = journal.tax_vault {
             self.tax_vault.rollback(tax_vault);
         }
@@ -170,8 +343,8 @@ impl LedgerState {
         if let Some(chip_war) = journal.chip_war {
             self.chip_war.rollback(chip_war);
         }
-        if let Some(account) = journal.account {
-            self.rollback_account(account)?;
+        if let Some(global_currency) = journal.global_currency {
+            self.global_currency = global_currency.previous;
         }
         Ok(())
     }
@@ -180,22 +353,34 @@ impl LedgerState {
         &mut self,
         journal: AccountRollbackJournal,
     ) -> Result<(), StateError> {
-        self.accounts.rollback(journal.accounts);
-        self.novus.total_mined = self
+        let total_mined = self
             .novus
             .total_mined
             .checked_sub(journal.mined)
             .ok_or(StateError::AmountOverflow)?;
-        self.novus.total_burned = self
+        let total_burned = self
             .novus
             .total_burned
             .checked_sub(journal.burned)
             .ok_or(StateError::AmountOverflow)?;
-        if let Some((currency, reward)) = journal.race_reward {
-            let remaining = self.novus.race_rewards.get(&currency).copied()
-                .unwrap_or(Amount::ZERO)
-                .checked_sub(reward)
-                .ok_or(StateError::AmountOverflow)?;
+        let race_reward = journal
+            .race_reward
+            .map(|(currency, reward)| {
+                self.novus
+                    .race_rewards
+                    .get(&currency)
+                    .copied()
+                    .unwrap_or(Amount::ZERO)
+                    .checked_sub(reward)
+                    .map(|remaining| (currency, remaining))
+                    .ok_or(StateError::AmountOverflow)
+            })
+            .transpose()?;
+
+        self.accounts.rollback(journal.accounts);
+        self.novus.total_mined = total_mined;
+        self.novus.total_burned = total_burned;
+        if let Some((currency, remaining)) = race_reward {
             if remaining.is_zero() {
                 self.novus.race_rewards.remove(&currency);
             } else {

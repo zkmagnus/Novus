@@ -17,21 +17,19 @@ use crate::sync::{
     HeaderChainChunk, MAX_HEADER_CHAIN_CHUNK_HEADERS, MAX_HEADER_CHAIN_CHUNK_SIZE,
     decode_header_chain_chunk,
 };
+use borsh::{BorshDeserialize, BorshSerialize};
 use novus::{
     blockchain::{Block, Emission, MAX_BLOCK_SIZE, block_bytes, decode_block},
     common::{Height, Nonce},
     consensus::{
-        ReorgPlan, Work, apply_block, compare_chain_tips, expected_emission_for_height,
-        expected_next_difficulty, new_pow_memory, validate_transaction,
+        ReorgPlan, Work, apply_block, compare_chain_tips, expected_next_difficulty,
+        validate_transaction,
     },
-    crypto::{
-        Address, BlockHash, PoWMemory, canonical_bytes, canonical_decode,
-    },
+    crypto::{Address, BlockHash, canonical_bytes, canonical_decode},
     genesis::{EXPECTED_GENESIS_HASH, chain_spec_hash, genesis_block},
     ledger::Ledger,
     transaction::{Amount, Transaction},
 };
-use borsh::{BorshDeserialize, BorshSerialize};
 
 const NODE_ID_FILE: &str = "node-id";
 const MAX_STORED_BLOCK_SIZE: usize = MAX_BLOCK_SIZE + 1024;
@@ -86,7 +84,7 @@ const MAX_HEADER_REQUESTS_PER_SESSION: usize =
     MAX_SYNC_HEADERS.div_ceil(MAX_HEADER_CHAIN_CHUNK_HEADERS) + 1;
 const MAX_GOSSIP_INVENTORY_ITEMS: usize = 1_024;
 const MAX_MEMPOOL_TRANSACTIONS: usize = MAX_GOSSIP_INVENTORY_ITEMS;
-const MIN_RELAY_FEE_ATOMIC_UNITS_PER_BYTE: u64 = 10;
+const MIN_RELAY_FEE_ATOMIC_UNITS_PER_BYTE: u64 = 1;
 const MAX_GOSSIP_INVENTORY_SIZE: usize = 64 * 1024;
 const GOSSIP_HEARTBEAT: Duration = Duration::from_secs(2);
 const MAX_INBOUND_CONNECTIONS: usize = 64;
@@ -189,13 +187,27 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RaceVariant { Accretia, Bellato, Cora }
+pub enum RaceVariant {
+    Accretia,
+    Bellato,
+    Cora,
+}
 
 pub fn run_for_race(args: Vec<String>, race: RaceVariant) -> Result<(), String> {
     if args.first().is_some_and(|arg| arg == "address-new") {
-        let words = args.get(1).map_or(Ok(12_usize), |value| value.parse::<usize>().map_err(|_| "word count must be 12 or 24"))?;
-        if !matches!(words, 12 | 24) { return Err("word count must be 12 or 24".into()); }
-        let address_race = match race { RaceVariant::Accretia => novus::crypto::Race::Accretia, RaceVariant::Bellato => novus::crypto::Race::Bellato, RaceVariant::Cora => novus::crypto::Race::Cora };
+        let words = args.get(1).map_or(Ok(12_usize), |value| {
+            value
+                .parse::<usize>()
+                .map_err(|_| "word count must be 12 or 24")
+        })?;
+        if !matches!(words, 12 | 24) {
+            return Err("word count must be 12 or 24".into());
+        }
+        let address_race = match race {
+            RaceVariant::Accretia => novus::crypto::Race::Accretia,
+            RaceVariant::Bellato => novus::crypto::Race::Bellato,
+            RaceVariant::Cora => novus::crypto::Race::Cora,
+        };
         let (address, wallet) = crate::wallet_tools::create_wallet(address_race, words)?;
         let path = args.get(2).map(String::as_str).unwrap_or("wallet.json");
         crate::wallet_tools::write_wallet_file(path, &wallet)?;
@@ -205,6 +217,14 @@ pub fn run_for_race(args: Vec<String>, race: RaceVariant) -> Result<(), String> 
     match args.first().map(String::as_str) {
         None => run_automatic(&[]),
         Some("run") => run_automatic(&args[1..]),
+        Some("wallet") => {
+            let wallet_race = match race {
+                RaceVariant::Accretia => novus::crypto::Race::Accretia,
+                RaceVariant::Bellato => novus::crypto::Race::Bellato,
+                RaceVariant::Cora => novus::crypto::Race::Cora,
+            };
+            crate::wallet_cli::run_for_race(args.get(1..).unwrap_or_default().to_vec(), wallet_race)
+        }
         Some("info") => config::print_network_info(),
         Some("check") => state::check_database(args.get(1).map(String::as_str)),
         Some("submit-block") => state::submit_block(
@@ -220,17 +240,17 @@ pub fn run_for_race(args: Vec<String>, race: RaceVariant) -> Result<(), String> 
             args.get(2).ok_or("missing transaction hex")?,
         ),
         Some("mempool") => mempool::print_mempool(args.get(1).map(String::as_str)),
-        Some("account") => explorer::print_account(
+        Some("account") | Some("balance") => explorer::print_account(
             args.get(1).map(String::as_str),
             args.get(2).ok_or("missing account address")?,
         ),
         Some("rpc") => rpc::serve_rpc(
             args.get(1).map(String::as_str),
-            args.get(2).map_or("127.0.0.1:4444", String::as_str),
+            args.get(2).map_or("127.0.0.1:10593", String::as_str),
         ),
         Some("p2p-listen") => p2p::serve_p2p(
             args.get(1).map(String::as_str),
-            args.get(2).map_or("0.0.0.0:6677", String::as_str),
+            args.get(2).map_or("0.0.0.0:10999", String::as_str),
         ),
         Some("network") => p2p::run_network(
             args.get(1).map(String::as_str),
@@ -265,10 +285,7 @@ fn run_automatic(args: &[String]) -> Result<(), String> {
     if let (Some(value), Some(address)) = (config.miner.as_deref(), miner) {
         println!(
             "miner: {value} -> {}",
-            novus::crypto::address_to_string(
-                &address,
-                address.race().prefix()
-            )
+            novus::crypto::address_to_string(&address, address.race().prefix())
         );
     }
     config::configure_public_address(&config)?;

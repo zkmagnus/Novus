@@ -95,7 +95,9 @@ pub(super) fn print_history_page(mut history: AddressHistoryResponse) -> Option<
             } else {
                 println!("  Amount: {}", format_amount(activity.amount));
             }
-            if let (Some(currency), Some(amount)) = (activity.output_currency.as_deref(), activity.output_amount) {
+            if let (Some(currency), Some(amount)) =
+                (activity.output_currency.as_deref(), activity.output_amount)
+            {
                 println!("  Converted to: {} {} atomic units", amount, currency);
             }
             for (currency, tax) in activity.protocol_tax {

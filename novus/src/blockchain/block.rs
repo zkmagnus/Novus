@@ -27,6 +27,7 @@ pub struct Header {
     pub merkle_root: MerkleHash,
     pub state_root: StateRoot,
     pub target_bits: u32,
+    /// Unix timestamp in seconds; validated against median-time-past and future drift.
     pub timestamp: u64,
     /// Exact canonical serialized block size in bytes.
     pub block_size: u32,
@@ -157,6 +158,18 @@ impl Block {
         transactions: Vec<Transaction>,
     ) -> Result<Self, CodecError> {
         let previous_hash = previous_hash.into();
+
+        #[cfg(any(test, feature = "test-utils"))]
+        let mut emission = emission;
+
+        #[cfg(not(any(test, feature = "test-utils")))]
+        let emission = emission;
+
+        #[cfg(any(test, feature = "test-utils"))]
+        if let Some(emission) = emission.as_mut() {
+            emission.subsidy = crate::consensus::reward_for_previous_hash(previous_hash.0);
+        }
+
         let merkle_root = calculate_merkle_root(emission.as_ref(), &transactions)?;
 
         let mut block = Self {
@@ -402,7 +415,9 @@ mod p3e_replay_tests {
 
     use crypto::{SignatureScheme, SigningSeed, address_from_public_key};
 
-    use crate::transaction::{AccountIntent, TransactionAuthorization, Amount, Transaction, Transfer};
+    use crate::transaction::{
+        AccountIntent, Amount, Transaction, TransactionAuthorization, Transfer,
+    };
     use common::ChainContext;
 
     fn duplicate_fixture() -> Transaction {
@@ -416,9 +431,14 @@ mod p3e_replay_tests {
             race: crate::transaction::Race::Accretia,
             register_race: true,
             nonce: 0,
-            transfers: vec![Transfer::new(signer, crate::transaction::Currency::Gold, Amount::from_atomic(1))],
+            transfers: vec![Transfer::new(
+                signer,
+                crate::transaction::Currency::Gold,
+                Amount::from_atomic(1),
+            )],
             conversion: None,
             fee: Amount::ZERO,
+            tax: Amount::ZERO,
             message: None,
         };
 

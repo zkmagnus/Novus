@@ -132,7 +132,31 @@ pub(super) fn print_network_info() -> Result<(), String> {
 
 pub(super) fn print_help() {
     println!(
-        "node address-new [12|24] [wallet.json]\nnode run [--data PATH] [--p2p ADDRESS] [--rpc ADDRESS] [--peer ADDRESS]... [--miner ADDRESS] [--public-addr ADDRESS | --nat-traversal]\nnode network [data-dir] [listen-address] [peer-address...]\nnode rpc [data-dir] [listen-address]\nnode p2p-listen [data-dir] [listen-address]\nnode peer [data-dir] <peer-address>\nnode info\nnode check [data-dir]\nnode account [data-dir] <address>\nnode mempool [data-dir]\nnode mine-block [data-dir] <miner-address>\nnode submit-transaction [data-dir] <transaction-hex>\nnode submit-block [data-dir] <block-hex>\nnode version"
+        r#"node run [--data PATH] [--p2p ADDRESS] [--rpc ADDRESS] [--peer ADDRESS]... [--miner ADDRESS] [--public-addr ADDRESS | --nat-traversal]
+node network [data-dir] [listen-address] [peer-address...]
+node rpc [data-dir] [listen-address]
+node p2p-listen [data-dir] [listen-address]
+node peer [data-dir] <peer-address>
+node info
+node check [data-dir]
+node balance [data-dir] <address>
+node account [data-dir] <address> (alias: balance)
+node wallet new [--wallet PATH] [--words 12|24]
+node wallet restore --mnemonic PHRASE [--wallet PATH]
+node wallet address|balance|history [OPTIONS]
+node wallet send --to ADDRESS --amount AMOUNT [OPTIONS]
+node wallet convert --amount AMOUNT --currency CURRENCY [--to CURRENCY] [OPTIONS]
+
+Convert examples (run with `node wallet convert`):
+  --amount 1000 --currency cp --to gold
+  --amount 1000 --currency gold --to novus (1,000 Gold = 1 Novus)
+  --amount 1 --currency gold --to cp|dlt|dsc
+
+node mempool [data-dir]
+node mine-block [data-dir] <miner-address>
+node submit-transaction [data-dir] <transaction-hex>
+node submit-block [data-dir] <block-hex>
+node version"#
     );
 }
 
@@ -142,12 +166,12 @@ pub(super) fn database_path(path: Option<&str>) -> PathBuf {
 
 #[cfg(feature = "mainnet")]
 pub(super) fn default_p2p_listen() -> &'static str {
-    "0.0.0.0:6677"
+    "0.0.0.0:10999"
 }
 
 #[cfg(feature = "mainnet")]
 pub(super) fn default_rpc_listen() -> &'static str {
-    "127.0.0.1:4444"
+    "127.0.0.1:10593"
 }
 
 #[cfg(feature = "mainnet")]

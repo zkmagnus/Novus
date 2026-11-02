@@ -8,7 +8,7 @@
 
 **Novus** is an experimental Layer 1 blockchain inspired by the world, factions, and economy of the **RF Online** game.
 
-The project is built in Rust and focuses on an account-based monetary system, lightweight consensus design, and Schnorr signatures.
+The project is built in Rust and focuses on an account-based monetary system, Proof of Work, and BIP340 Schnorr signatures.
 
 > Novus is an independent project and is not affiliated with, endorsed by, or associated with the owners of the RF Online intellectual property or any official RF Online license holder. RF Online is referenced only to describe the project's inspiration.
 
@@ -28,7 +28,7 @@ Account balance + nonce
           |
           +----> debit sender and advance nonce
           +----> credit recipients
-          +----> add sender-race fee to the matching currency in Tax Vault
+          +----> relay fee in Gold, or in Novus for Novus transfers; Novus relay fee goes directly to the block miner
 ```
 
 Conceptually:
@@ -36,7 +36,8 @@ Conceptually:
 ```text
 Amount        = currency quantity in atomic units
 Account       = address, per-currency balances, next nonce
-Transaction fee = sender race's native currency, credited to Tax Vault
+Transaction fee = Gold for race currency and Gold transfers; source currency for conversions; Novus for Novus transfers
+Transaction tax = rates and denomination follow the transfer or conversion policy below
 ```
 
 ---
@@ -49,24 +50,23 @@ Novus aims to remain:
 - **Account-based** — balances and transaction nonces are stored per address.
 - **Open** — anyone can run a node and participate.
 - **Deterministic** — consensus-critical state transitions are reproducible.
-- **Cryptographically agile** — the protocol can evolve its cryptographic primitives.
-- **Post-quantum oriented** — the project explores post-quantum digital signatures.
+- **Cryptographically modular** — hashing and signature code live in the `crypto` crate.
 - **Experimental** — Novus is a research and development blockchain.
 
 ---
 
 ## Currency Precision
 
-Every currency uses three decimal places:
+CP, Dalant, Disena, Gold, and Novus each use six decimal places:
 
 ```text
-1 whole currency = 1,000 atomic units
+1 whole currency = 1,000,000 atomic units
 ```
 
 or:
 
 ```rust
-pub const DECIMALS: u8 = 3;
+pub const DECIMALS: u8 = 6;
 ```
 
 Amounts are represented using an unsigned atomic-unit count inside the shared `Amount` type:
@@ -99,7 +99,10 @@ sender
 nonce
 transfers
 fee
+protocol-calculated tax
 ```
+
+The signed tax amount is denominated in the transaction's source currency. Wallets show it before submission, and nodes recompute it from the active protocol rules and reject a transaction if the signed amount is stale or incorrect.
 
 The authorization layer contains:
 
@@ -116,7 +119,7 @@ Transaction commitments are domain-separated and bound to the chain context to r
 
 ## Consensus
 
-Novus uses a Proof-of-Work design.
+Novus uses Bitcoin-style double SHA-256 (SHA-256d) Proof of Work over block headers.
 
 The current design targets an average block interval of approximately:
 
@@ -140,27 +143,29 @@ difficulty target
 
 model.
 
-Difficulty is adjusted over time to keep block production near the target interval.
-
-Novus intentionally keeps its Proof-of-Work design relatively simple rather than introducing block-size-based difficulty adjustments.
+Chip War epochs last 3 days (8,640 blocks at the 30-second target). Tax and exchange outcomes settle at each epoch boundary, and difficulty retargets at the start of the next epoch. Block timestamps must be after the median time of recent blocks and no more than two hours ahead of local time.
 
 ---
 
 ## Block Reward
 
-Novus uses a fixed block subsidy:
+The block subsidy is deterministically derived from the previous block hash and ranges inclusively from:
 
 ```text
-100 BELLY per block
+100 to 1,000 coins per block
 ```
 
-The current design does not use Bitcoin-style halvings.
+The current design has no per-block emission target or Bitcoin-style halving schedule. Because miners can try different candidate blocks and parent hashes, this reward method is verifiable but can be influenced through hash grinding.
 
 Block emissions are credited directly to the miner's account and are spendable immediately.
 
 Blocks become final after 10,080 confirmations. The node keeps a permanent finalized height and rejects any rollback or peer branch that would replace a block at or below that height. Chain selection among eligible branches still uses cumulative work.
 
 This means miners continue receiving the protocol-defined block subsidy as the chain grows.
+
+Novus is a global currency. Gold converts one way into Novus at a fixed rate of 1,000 Gold to 1 Novus; Novus cannot be converted back to Gold. Gold transfers are restricted to accounts of the sender's race, while Novus transfers can cross races. The base exchange rate for each race's native currency is 10,000 units per Gold, adjusted by Chip War by up to 20%. Chip War tax adjustments apply to every taxable transaction type, using the sender's race. Base rates are 1% for race-currency transfers, 5% for race-currency-to-Gold conversions, 2% for Gold transfers and 5% for Gold-to-race conversions, and 10% for Gold-to-Novus conversion. The Chip War tax modifier starts at 0 percentage points. At each settlement, a loss adds 2 points, a failure adds 1, and a win subtracts 1 only when the modifier is above 0. Each effective tax is its transaction's base rate plus the modifier, capped at 20%; it never falls below the base rate. Taxes are paid in the source currency. Conversion relay fees are also paid in the source currency, so users do not need an existing Gold balance to convert race currency to Gold. Novus transfers are exempt from protocol tax. Their Novus relay fees are credited directly to the miner of the block containing the transaction, regardless of the miner's race. Gold relay fees and transaction taxes remain in the tax vault for eligible miners to claim.
+
+The initial global exchange vault holds 100 million Gold. Gold converted to Novus is burned. After each cumulative 100 million Gold converted, the protocol issues 100 million Gold back into the global exchange vault. Conversion progress, total Gold burned, and total Novus minted are consensus state and are available from `/status`.
 
 ---
 
@@ -187,7 +192,7 @@ novus/
 ├── novus/
 ├── runtime/
 ├── wallet/
-├── depend/
+├── dependency/
 └── Cargo.toml
 ```
 
@@ -235,7 +240,7 @@ Node runtime and networking components.
 
 Wallet functionality for creating keys, checking balances, constructing transactions, and interacting with a Novus node.
 
-### `depend`
+### `dependency`
 
 Vendored dependencies used by the workspace.
 
@@ -288,92 +293,88 @@ For an optimized build:
 cargo build --release
 ```
 
-Build individual components:
+Build the three race node binaries in release mode:
 
 ```bash
-cargo build -p novus
-cargo build -p crypto
-cargo build -p wallet
-cargo build -p node
+cargo build --release -p accretia
+cargo build --release -p bellato
+cargo build --release -p cora
 ```
 
 ---
 
 ## Check the Workspace
 
-Before running the software, check that all crates compile:
+Check that the complete workspace compiles:
 
 ```bash
-cargo check
-```
-
-For a specific crate:
-
-```bash
-cargo check -p novus
-cargo check -p wallet
-cargo check -p node
+cargo check --workspace
 ```
 
 ---
 
 ## Run the Node
 
-After building the release version:
+Each race node is a separate binary. For example, run the Accretia node with RPC on the default local port `10593`:
 
 ```bash
-cargo build --release -p node
+cargo run --release -p accretia -- run
 ```
 
-Run the node binary from:
+The RPC listener defaults to `127.0.0.1:10593`; the P2P listener defaults to `0.0.0.0:10999`. Override them with `--rpc` and `--p2p`; set the database directory with `--data`:
 
 ```bash
-./target/release/novus
+cargo run --release -p accretia -- run --data ./data/accretia --rpc 127.0.0.1:10593
 ```
 
-During development you can also use:
+Use `bellato` or `cora` instead of `accretia` to run the other race variants. To run only the RPC server against a database:
 
 ```bash
-cargo run -p novus
+cargo run --release -p accretia -- rpc ./data/accretia 127.0.0.1:10593
 ```
 
-Node configuration and available command-line options may evolve while Novus is under development.
-
-Check available options with:
+View the node commands with:
 
 ```bash
-cargo run -p novus -- --help
+cargo run -p accretia -- help
 ```
 
-or:
-
-```bash
-./target/release/novus --help
-```
+The wallet and node default RPC address is `127.0.0.1:10593`.
 
 ---
 
-## Run the Wallet
+## Wallet Commands
 
-Build the wallet:
-
-```bash
-cargo build --release -p wallet
-```
-
-Run:
+Wallet operations are subcommands of each race node binary; there is no separate wallet executable or interactive menu. The wallet library remains a workspace crate used by the node. Create a wallet, then check its address and balance:
 
 ```bash
-./target/release/wallet
+cargo run -p accretia -- wallet new --wallet ./wallet.json
+cargo run -p accretia -- wallet address --wallet ./wallet.json
+cargo run -p accretia -- wallet balance --wallet ./wallet.json --rpc 127.0.0.1:10593
 ```
 
-During development:
+Send 1.25 units of the wallet's race currency (or use `--currency novus` for Novus):
 
 ```bash
-cargo run -p wallet
+cargo run -p accretia -- wallet send --to <recipient-address> --amount 1.25 --currency cp --wallet ./wallet.json --rpc 127.0.0.1:10593
 ```
 
-The wallet communicates with a running Novus node for blockchain state, balances, transaction broadcasting, and related operations.
+Send Novus or convert Gold to Novus:
+
+```bash
+cargo run -p accretia -- wallet send --to <recipient-address> --amount 2 --currency novus --wallet ./wallet.json
+cargo run -p accretia -- wallet convert --amount 1 --currency gold --to novus --wallet ./wallet.json
+```
+
+Convert the wallet's race currency to Gold with `--to gold` (use `cp`, `dlt`, or `dsc` to match the wallet's race):
+
+```bash
+cargo run -p accretia -- wallet convert --amount 1000 --currency cp --to gold --wallet ./wallet.json
+```
+
+Gold converts one way to Novus at **1,000 Gold = 1 Novus**.
+
+Use `--offline` to print a signed transaction as hex without submitting it. CLI amounts use coin units with up to six decimal places; JSON RPC balances use atomic units. For example, `1.25` coins equals `1,250,000` atomic units. The node also provides `node balance` as an alias for `node account` when using its race binary, and serves the interactive RPC reference at `http://127.0.0.1:10593/docs` and the raw OpenAPI document at `http://127.0.0.1:10593/openapi.json`.
 
 ---
 

@@ -126,14 +126,13 @@ pub(super) fn build_header_state_checkpoints(
             continue;
         }
 
-        let block_work =
-            novus::consensus::block_work(block.target_bits()).ok_or_else(|| {
-                format!(
-                    "invalid target bits {:08x} at height {}",
-                    block.target_bits(),
-                    height.0,
-                )
-            })?;
+        let block_work = novus::consensus::block_work(block.target_bits()).ok_or_else(|| {
+            format!(
+                "invalid target bits {:08x} at height {}",
+                block.target_bits(),
+                height.0,
+            )
+        })?;
 
         cumulative_work = cumulative_work.saturating_add(block_work);
 
@@ -204,14 +203,13 @@ fn updated_header_state_checkpoints(
             .block(&height)
             .ok_or("canonical block is missing while updating checkpoints")?;
 
-        let block_work =
-            novus::consensus::block_work(block.target_bits()).ok_or_else(|| {
-                format!(
-                    "invalid target bits {:08x} at height {}",
-                    block.target_bits(),
-                    height.0,
-                )
-            })?;
+        let block_work = novus::consensus::block_work(block.target_bits()).ok_or_else(|| {
+            format!(
+                "invalid target bits {:08x} at height {}",
+                block.target_bits(),
+                height.0,
+            )
+        })?;
 
         cumulative_work = cumulative_work.saturating_add(block_work);
 

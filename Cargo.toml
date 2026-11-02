@@ -17,7 +17,6 @@ authors = ["Mandala <https://x.com/mandala17th>"]
 debug = true
 
 [workspace.dependencies]
-argon2 = { version = "0.5.3", default-features = false, features = ["alloc"], path = "dependency/argon2/argon2" }
 bip39 = "2.2"
 borsh = { version = "1.5", features = ["derive"], path = "dependency/traits/borsh" }
 getrandom = { version = "0.4.3", default-features = false }
@@ -40,27 +39,13 @@ serde = { path = "dependency/traits/serde" }
 serde_core = { path = "dependency/traits/serde_core" }
 serde_derive = { path = "dependency/traits/serde_derive" }
 
-autocfg = { path = "dependency/utils/autocfg" }
-block-buffer = { path = "dependency/utils/block-buffer" }
-crypto-common = { path = "dependency/utils/crypto-common-0.1.7" }
-digest = { path = "dependency/traits/digest-0.10.7" }
-generic-array = { path = "dependency/utils/generic-array" }
 hybrid-array = { path = "dependency/utils/hybrid-array" }
-
-num-traits = { path = "dependency/traits/num-traits" }
 
 proc-macro2 = { path = "dependency/proc-macro/proc-macro2" }
 quote = { path = "dependency/proc-macro/quote" }
 syn = { path = "dependency/proc-macro/syn-2.0.119" }
 unicode-ident = { path = "dependency/proc-macro/unicode-ident" }
 
-rand_core = { path = "dependency/traits/rand_core" }
-signature = { path = "dependency/traits/signature" }
-
-cpubits = { path = "dependency/utils/cpubits" }
-ctutils = { path = "dependency/utils/ctutils" }
-subtle = { path = "dependency/utils/subtle" }
 typenum = { path = "dependency/utils/typenum" }
-version_check = { path = "dependency/utils/version_check" }
 
 zeroize_derive = { path = "dependency/traits/zeroize_derive" }

@@ -7,13 +7,13 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use crate::{
     blockchain::{Header, MAX_BLOCK_SIZE},
     consensus::{
-        DIFFICULTY_ADJUSTMENT_WINDOW, ForkChoiceError, Work, block_work,
-        expected_difficulty_for_height, new_pow_memory, verify_pow_with_memory,
+        DIFFICULTY_ADJUSTMENT_WINDOW, ForkChoiceError, MEDIAN_TIME_PAST_WINDOW, Work, block_work,
+        expected_difficulty_for_height, unix_time_now, validate_timestamp, verify_pow,
     },
 };
 use common::Height;
 
-use crypto::{BlockHash, PoWMemory};
+use crypto::BlockHash;
 
 pub const RECENT_HEADER_WINDOW: usize = (DIFFICULTY_ADJUSTMENT_WINDOW as usize) * 2;
 
@@ -89,8 +89,6 @@ pub fn verify_header_chain(
     let mut previous = first;
     let mut cumulative_work = Work::ZERO;
     let mut recent = vec![first.clone()];
-    let mut pow_memory = (headers.len() > 1).then(new_pow_memory);
-
     for current in &headers[1..] {
         validate_header_size(&current.header)?;
 
@@ -100,6 +98,8 @@ pub fn verify_header_chain(
             return Err(HeaderChainError::InvalidCommonAncestor);
         }
 
+        validate_header_timestamp(&current.header, &recent)?;
+
         let expected = expected_header_difficulty(previous, &recent)?;
 
         if current.header.target_bits != expected {
@@ -108,14 +108,7 @@ pub fn verify_header_chain(
             ));
         }
 
-        verify_pow_with_memory(
-            &current.header,
-            expected,
-            pow_memory
-                .as_mut()
-                .expect("non-genesis headers allocate PoW memory"),
-        )
-        .map_err(|error| {
+        verify_pow(&current.header, expected).map_err(|error| {
             HeaderChainError::InvalidHeaderChain(ForkChoiceError::InvalidProofOfWork(error))
         })?;
 
@@ -144,6 +137,21 @@ fn validate_header_size(header: &Header) -> Result<(), HeaderChainError> {
     }
 
     Ok(())
+}
+
+fn validate_header_timestamp(
+    header: &Header,
+    previous_headers: &[HeaderAtHeight],
+) -> Result<(), HeaderChainError> {
+    let timestamps = previous_headers
+        .iter()
+        .rev()
+        .take(MEDIAN_TIME_PAST_WINDOW)
+        .map(|candidate| candidate.header.timestamp)
+        .collect::<Vec<_>>();
+    validate_timestamp(header.timestamp, &timestamps, unix_time_now()).map_err(|error| {
+        HeaderChainError::InvalidHeaderChain(ForkChoiceError::InvalidTimestamp(error))
+    })
 }
 
 fn expected_header_difficulty(
@@ -200,24 +208,6 @@ pub fn verify_header_chain_extension(
     state: &HeaderValidationState,
     headers: &[HeaderAtHeight],
 ) -> Result<(BlockHash, Work), HeaderChainError> {
-    let mut pow_memory = (!headers.is_empty()).then(new_pow_memory);
-
-    verify_header_chain_extension_inner(state, headers, pow_memory.as_mut())
-}
-
-pub fn verify_header_chain_extension_with_memory(
-    state: &HeaderValidationState,
-    headers: &[HeaderAtHeight],
-    pow_memory: &mut PoWMemory,
-) -> Result<(BlockHash, Work), HeaderChainError> {
-    verify_header_chain_extension_inner(state, headers, Some(pow_memory))
-}
-
-fn verify_header_chain_extension_inner(
-    state: &HeaderValidationState,
-    headers: &[HeaderAtHeight],
-    mut pow_memory: Option<&mut PoWMemory>,
-) -> Result<(BlockHash, Work), HeaderChainError> {
     let checkpoint_hash = state
         .header
         .hash()
@@ -250,6 +240,8 @@ fn verify_header_chain_extension_inner(
             return Err(HeaderChainError::InvalidCommonAncestor);
         }
 
+        validate_header_timestamp(header, &recent)?;
+
         let expected_difficulty = expected_difficulty_for_height(
             chain_header.height.0,
             previous.target_bits,
@@ -276,14 +268,7 @@ fn verify_header_chain_extension_inner(
             ));
         }
 
-        verify_pow_with_memory(
-            header,
-            expected_difficulty,
-            pow_memory
-                .as_deref_mut()
-                .expect("non-empty header extension supplies PoW memory"),
-        )
-        .map_err(|error| {
+        verify_pow(header, expected_difficulty).map_err(|error| {
             HeaderChainError::InvalidHeaderChain(ForkChoiceError::InvalidProofOfWork(error))
         })?;
 
@@ -313,17 +298,6 @@ pub fn advance_header_validation_state(
     headers: &[HeaderAtHeight],
 ) -> Result<HeaderValidationState, HeaderChainError> {
     let (_, cumulative_work) = verify_header_chain_extension(state, headers)?;
-
-    advanced_header_validation_state(state, headers, cumulative_work)
-}
-
-pub fn advance_header_validation_state_with_memory(
-    state: &HeaderValidationState,
-    headers: &[HeaderAtHeight],
-    pow_memory: &mut PoWMemory,
-) -> Result<HeaderValidationState, HeaderChainError> {
-    let (_, cumulative_work) =
-        verify_header_chain_extension_with_memory(state, headers, pow_memory)?;
 
     advanced_header_validation_state(state, headers, cumulative_work)
 }

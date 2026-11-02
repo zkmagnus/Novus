@@ -1,10 +1,10 @@
 //! Canonical ledger state and rollback journal types.
 
 use super::account::AccountState;
-use super::tax::{TaxVault, TaxVaultRollback};
-use super::exchange::{ExchangeVault, ExchangeVaultRollback};
 use super::chip_war::{ChipWarRollback, ChipWarState};
-use crate::transaction::{Currency, Amount};
+use super::exchange::{ExchangeVault, ExchangeVaultRollback};
+use super::tax::{TaxVault, TaxVaultRollback};
+use crate::transaction::{Amount, Currency};
 use std::collections::BTreeMap;
 
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -16,6 +16,17 @@ pub struct LedgerState {
     pub tax_vault: TaxVault,
     pub exchange_vault: ExchangeVault,
     pub chip_war: ChipWarState,
+    pub global_currency: GlobalCurrencyState,
+}
+
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone, Default, PartialEq, Eq)]
+pub struct GlobalCurrencyState {
+    /// Gold converted into Novus since the last Gold refill.
+    pub gold_converted_this_cycle: Amount,
+    /// Total Gold burned by Gold-to-Novus conversions.
+    pub total_gold_burned: Amount,
+    /// Total Novus minted by Gold-to-Novus conversions.
+    pub total_novus_minted: Amount,
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, Default, PartialEq, Eq)]
@@ -39,4 +50,10 @@ pub struct StateRollbackJournal {
     pub tax_vault: Option<TaxVaultRollback>,
     pub exchange_vault: Option<ExchangeVaultRollback>,
     pub chip_war: Option<ChipWarRollback>,
+    pub global_currency: Option<GlobalCurrencyRollback>,
+}
+
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone, PartialEq, Eq)]
+pub struct GlobalCurrencyRollback {
+    pub previous: GlobalCurrencyState,
 }

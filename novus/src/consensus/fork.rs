@@ -1,6 +1,9 @@
 use crate::{
     blockchain::{Block, MAX_BLOCK_SIZE},
-    consensus::{Consensus, GENESIS_TARGET_BITS, PoWTarget, expected_difficulty_for_height},
+    consensus::{
+        Consensus, GENESIS_TARGET_BITS, MEDIAN_TIME_PAST_WINDOW, PoWTarget, TimestampError,
+        expected_difficulty_for_height, unix_time_now, validate_timestamp,
+    },
 };
 use common::Height;
 
@@ -136,6 +139,20 @@ impl ForkChoice {
         };
         let expected_difficulty = self.expected_difficulty_for(&block, parent)?;
         if !block.is_genesis() {
+            let first_height = block
+                .height()
+                .0
+                .saturating_sub(MEDIAN_TIME_PAST_WINDOW as u64);
+            let previous_timestamps = (first_height..block.height().0)
+                .map(|height| {
+                    self.ancestor_at_height(parent, Height(height))
+                        .map(|node| node.block.timestamp())
+                        .ok_or(ForkChoiceError::MissingParent)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            validate_timestamp(block.timestamp(), &previous_timestamps, unix_time_now())
+                .map_err(ForkChoiceError::InvalidTimestamp)?;
+
             if block.target_bits() != expected_difficulty {
                 return Err(ForkChoiceError::InvalidDifficulty);
             }
@@ -285,6 +302,7 @@ pub enum ForkChoiceError {
     UnexpectedGenesis,
     InvalidBlock(crate::blockchain::BlockError),
     InvalidDifficulty,
+    InvalidTimestamp(TimestampError),
     InvalidHeader,
     InvalidProofOfWork(crate::consensus::ConsensusError),
     InvalidHeight,
@@ -301,6 +319,7 @@ impl fmt::Display for ForkChoiceError {
             }
             Self::InvalidBlock(error) => write!(f, "fork graph block is invalid: {error}"),
             Self::InvalidDifficulty => f.write_str("block difficulty is invalid for its branch"),
+            Self::InvalidTimestamp(error) => write!(f, "invalid block timestamp: {error}"),
             Self::InvalidHeader => f.write_str("block header fields are outside consensus bounds"),
             Self::InvalidProofOfWork(error) => write!(f, "block proof of work is invalid: {error}"),
             Self::InvalidHeight => f.write_str("block height does not follow its parent"),
@@ -315,6 +334,7 @@ impl Error for ForkChoiceError {
         match self {
             Self::InvalidBlock(error) => Some(error),
             Self::InvalidProofOfWork(error) => Some(error),
+            Self::InvalidTimestamp(error) => Some(error),
             _ => None,
         }
     }
@@ -334,10 +354,9 @@ pub fn block_work(target_bits: u32) -> Option<Work> {
     //
     let mut denominator = [0_u64; 5];
 
-    for (index, chunk) in target.as_bytes().chunks_exact(8).enumerate() {
-        let mut bytes = [0_u8; 8];
-        bytes.copy_from_slice(chunk);
-        denominator[index + 1] = u64::from_be_bytes(bytes);
+    let (chunks, _) = target.as_bytes().as_chunks::<8>();
+    for (index, chunk) in chunks.iter().enumerate() {
+        denominator[index + 1] = u64::from_be_bytes(*chunk);
     }
 
     add_one_u320(&mut denominator);

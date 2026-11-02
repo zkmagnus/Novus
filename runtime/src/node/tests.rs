@@ -1,8 +1,31 @@
 use super::*;
 use super::{
     chain_sync::*, explorer::*, gossip::*, index::*, mempool::*, protocol::*, rpc::*, state::*,
-    util::*,
 };
+
+fn test_transaction(seed_byte: u8, recipient: Address) -> Transaction {
+    let mnemonic = wallet::encode_bip39_mnemonic(&[seed_byte; 16]).unwrap();
+    let signer =
+        wallet::wallet_from_bip39_mnemonic(&mnemonic, novus::crypto::Signature::Schnorr).unwrap();
+    let race = novus::transaction::Race::from(signer.address.race());
+    signer
+        .sign_intent(novus::transaction::AccountIntent {
+            sender: signer.address,
+            race,
+            register_race: true,
+            nonce: 0,
+            transfers: vec![novus::transaction::Transfer::new(
+                recipient,
+                novus::transaction::Currency::for_race_reward(race),
+                Amount::from_atomic(10),
+            )],
+            conversion: None,
+            fee: Amount::ZERO,
+            tax: Amount::ONE,
+            message: None,
+        })
+        .unwrap()
+}
 
 #[test]
 fn embedded_api_documentation_is_valid_and_references_every_rpc_route() {
@@ -15,11 +38,6 @@ fn embedded_api_documentation_is_valid_and_references_every_rpc_route() {
         "/block/{height}",
         "/balance/{address}",
         "/account/{address}",
-        "/asset/{asset}",
-        "/asset/{asset}/balance/{address}",
-        "/pools",
-        "/pool/{pool}",
-        "/pool/shares/{address}",
         "/explorer/address/{address}",
         "/explorer/transaction/{transaction_id}",
         "/transaction",
@@ -37,115 +55,11 @@ fn embedded_api_documentation_is_valid_and_references_every_rpc_route() {
 }
 
 #[test]
-fn asset_transaction_projection_exposes_asset_and_action() {
-    let chain = novus::genesis::chain_context().unwrap();
-    let seed = novus::crypto::SigningSeed::new(
-        novus::crypto::Signature::Schnorr,
-        Box::new([0x51; 32]),
-    );
-    let public_key = seed.public_key();
-    let signer = novus::crypto::address_from_public_key(&public_key);
-    let asset_call = novus::transaction::AssetIntent::new(
-        novus::transaction::AssetInstruction::Register {
-            name: "Test Token".into(),
-            decimals: 8,
-            max_supply: novus::native::asset::Unit::from_units(100_000_000_000_000_000_000_000),
-            initial_mint: novus::native::asset::Unit::from_units(1_000_000),
-            mint_authority: signer,
-            nonce: 0,
-        },
-        signer,
-    );
-    let signature = seed.sign(&asset_call.commitment(chain.genesis_hash).unwrap());
-    let asset = asset_call.asset().unwrap().to_string();
-    let transaction = novus::transaction::AuthorizedAssetTransaction {
-        call: novus::transaction::AuthorizedNakamaIntent {
-            intent: asset_call,
-            authorization: novus::transaction::TransactionAuthorization {
-                public_key,
-                signature,
-            },
-        },
-        payment: novus::transaction::AuthorizedNakamaIntent {
-            intent: novus::transaction::SpendIntent {
-                signer: Address::ZERO,
-                spend: novus::transaction::Spend::Coin {
-                    inputs: vec![],
-                    outputs: vec![],
-                },
-            },
-            authorization: novus::transaction::TransactionAuthorization {
-                public_key: seed.public_key(),
-                signature: novus::crypto::TransactionSignature {
-                    scheme: novus::crypto::Signature::Schnorr,
-                    bytes: vec![],
-                },
-            },
-        },
-    };
-    let response =
-        asset_transaction_response(&transaction, Address::ZERO, Amount::from_atomic(4_782));
-    assert_eq!(response["asset"], asset);
-    assert_eq!(response["asset_instruction"]["type"], "register");
-    assert_eq!(response["bountyhunter_fee"], 0);
-    assert_eq!(
-        response["asset_instruction"]["max_supply"],
-        "100000000000000000000000"
-    );
-}
-
-#[test]
-fn explorer_bountyhunter_fee_uses_bounty_hunter_output() {
-    let outputs = vec![CoinOutput {
-        output: Recipient::BountyHunter,
-        amount: Amount::from_atomic(2_284),
-    }];
-    assert_eq!(bountyhunter_fee_from_outputs(&outputs).unwrap(), 2_284);
-}
-
-#[test]
-fn account_projection_lists_asset_supply_and_creator_shares() {
-    let seed = novus::crypto::SigningSeed::new(
-        novus::crypto::Signature::Schnorr,
-        Box::new([0x61; 32]),
-    );
-    let authority = novus::crypto::address_from_public_key(&seed.public_key());
-    let call = novus::transaction::AssetIntent::new(
-        novus::transaction::AssetInstruction::Register {
-            name: "Authority Asset".into(),
-            decimals: 0,
-            max_supply: novus::native::asset::Unit::from_units(10),
-            initial_mint: novus::native::asset::Unit::from_units(4),
-            mint_authority: authority,
-            nonce: 0,
-        },
-        authority,
-    );
-    let mut ledger = Ledger::new();
-    ledger
-        .state
-        .assets
-        .apply(&mut ledger.state.utxos, &call, [0; 32])
-        .unwrap();
-
-    let assets = nakama_asset_balances(&ledger, authority).unwrap();
-    assert_eq!(assets.len(), 1);
-    assert_eq!(assets[0]["max_supply"], "10");
-    assert_eq!(assets[0]["mint"], "4");
-    assert!(assets[0].get("balance").is_none());
-    assert_eq!(assets[0]["shares"].as_array().unwrap().len(), 1);
-    assert_eq!(assets[0]["shares"][0]["amount"], "4");
-    assert!(
-        assets[0]["shares"][0]["share_id"].as_str().unwrap().len()
-            == novus::crypto::HASH_SIZE * 2
-    );
-}
-
-#[test]
 fn explorer_address_response_is_aggregate_only() {
     let ledger = novus::genesis::genesis_ledger().unwrap();
+    let database = test_database("explorer-address-response");
     let response = explorer_address_response(
-        Path::new("test explorer address"),
+        &database,
         &ledger,
         &[],
         Address::new([7; novus::crypto::ADDRESS_SIZE]),
@@ -179,6 +93,7 @@ fn explorer_address_pagination_rebuilds_after_reorg() {
             Height(height),
             ledger.tip_hash().expect("branch A tip"),
             target_bits,
+            1,
             Nonce(height),
             Some(Emission::new(miner, Amount::from_atomic(1))),
             vec![],
@@ -214,6 +129,7 @@ fn explorer_address_pagination_rebuilds_after_reorg() {
             Height(height),
             ledger.tip_hash().expect("branch B tip"),
             target_bits,
+            1,
             Nonce(100 + height),
             Some(Emission::new(miner, Amount::from_atomic(1))),
             vec![],
@@ -273,6 +189,7 @@ fn explorer_address_pagination_advances_when_emissions_are_hidden() {
             Height(height),
             ledger.tip_hash().expect("canonical tip"),
             target_bits,
+            1,
             Nonce(height),
             Some(Emission::new(miner, Amount::from_atomic(1))),
             vec![],
@@ -327,51 +244,26 @@ fn explorer_address_pagination_advances_when_emissions_are_hidden() {
 }
 
 #[test]
-fn explorer_activity_reports_net_transfer_for_sender_and_recipient() {
-    let mnemonic = wallet::encode_bip39_mnemonic(&[3; 16]).unwrap();
-    let sender =
-        wallet::wallet_from_bip39_mnemonic(&mnemonic, novus::crypto::Signature::Schnorr)
-            .unwrap();
+fn explorer_activity_reports_account_transfer_for_sender_and_recipient() {
     let recipient = Address::new([4; novus::crypto::ADDRESS_SIZE]);
-    let miner = Address::new([5; novus::crypto::ADDRESS_SIZE]);
-    let intent = novus::transaction::SpendIntent::coin(
-        sender.address,
-        vec![novus::native::coin::XPQ::from_bytes(
-            [6; novus::native::coin::XPQ::SIZE],
-        )],
-        vec![
-            CoinOutput::new(recipient, Amount::from_atomic(10)),
-            CoinOutput::new(sender.address, Amount::from_atomic(5)),
-        ],
-    )
-    .unwrap();
-    let transaction = AuthorizedTransaction::Spend(Box::new(
-        novus::transaction::AuthorizedSpendTransaction {
-            spend: sender.sign_intent(intent).unwrap(),
-            payment: None,
-        },
-    ));
-    let genesis = genesis_block().unwrap();
+    let transaction = test_transaction(3, recipient);
     let block = Block::from_protocol_transactions(
         Height(1),
-        genesis.hash().unwrap(),
+        EXPECTED_GENESIS_HASH,
+        1,
         1,
         Nonce(0),
-        Some(Emission::new(miner, Amount::from_atomic(1))),
+        None,
         vec![transaction.clone()],
     )
     .unwrap();
-
-    let outgoing = address_transaction_activity(&transaction, sender.address, &block)
-        .unwrap()
-        .unwrap();
+    let outgoing =
+        address_transaction_activity(&transaction, transaction.intent.sender, &block, 1, 100)
+            .unwrap()
+            .unwrap();
     assert_eq!(outgoing["direction"], "out");
     assert_eq!(outgoing["amount"], 10);
-    assert_eq!(
-        outgoing["size_bytes"],
-        canonical_bytes(&transaction).unwrap().len()
-    );
-    let incoming = address_transaction_activity(&transaction, recipient, &block)
+    let incoming = address_transaction_activity(&transaction, recipient, &block, 1, 100)
         .unwrap()
         .unwrap();
     assert_eq!(incoming["direction"], "in");
@@ -381,13 +273,11 @@ fn explorer_activity_reports_net_transfer_for_sender_and_recipient() {
             &transaction,
             Address::new([9; novus::crypto::ADDRESS_SIZE]),
             &block,
+            1,
+            100
         )
         .unwrap()
         .is_none()
-    );
-    assert_eq!(
-        parse_hash(&hex::encode(transaction.id().unwrap())).unwrap(),
-        transaction.id().unwrap()
     );
 }
 
@@ -432,6 +322,7 @@ fn append_synthetic_header_block(ledger: &mut Ledger, miner: Address) {
         height,
         previous,
         target_bits,
+        1,
         Nonce(0),
         Some(Emission::new(miner, Amount::from_atomic(1))),
         Vec::new(),
@@ -529,31 +420,9 @@ fn explorer_tx_index_finds_canonical_transaction() {
 
     let mut ledger = novus::genesis::genesis_ledger().expect("genesis ledger");
 
-    let mnemonic = wallet::encode_bip39_mnemonic(&[0x31; 16]).unwrap();
-
-    let sender =
-        wallet::wallet_from_bip39_mnemonic(&mnemonic, novus::crypto::Signature::Schnorr)
-            .unwrap();
-
     let recipient = Address::new([0x32; novus::crypto::ADDRESS_SIZE]);
-
     let miner = Address::new([0x33; novus::crypto::ADDRESS_SIZE]);
-
-    let intent = novus::transaction::SpendIntent::coin(
-        sender.address,
-        vec![novus::native::coin::XPQ::from_bytes(
-            [0x34; novus::native::coin::XPQ::SIZE],
-        )],
-        vec![CoinOutput::new(recipient, Amount::from_atomic(10))],
-    )
-    .unwrap();
-
-    let transaction = AuthorizedTransaction::Spend(Box::new(
-        novus::transaction::AuthorizedSpendTransaction {
-            spend: sender.sign_intent(intent).unwrap(),
-            payment: None,
-        },
-    ));
+    let transaction = test_transaction(0x31, recipient);
 
     let transaction_hash = transaction.id().expect("transaction ID");
 
@@ -569,6 +438,7 @@ fn explorer_tx_index_finds_canonical_transaction() {
         Height(1),
         previous,
         target_bits,
+        1,
         Nonce(0),
         Some(Emission::new(miner, Amount::from_atomic(1))),
         vec![transaction],
@@ -670,32 +540,11 @@ fn explorer_index_extends_after_canonical_append() {
 
     let miner = Address::new([0x41; novus::crypto::ADDRESS_SIZE]);
 
-    let make_transaction = |seed_byte: u8, input_byte: u8, recipient_byte: u8| {
-        let mnemonic = wallet::encode_bip39_mnemonic(&[seed_byte; 16]).unwrap();
-
-        let sender = wallet::wallet_from_bip39_mnemonic(
-            &mnemonic,
-            novus::crypto::Signature::Schnorr,
+    let make_transaction = |seed_byte: u8, _input_byte: u8, recipient_byte: u8| {
+        test_transaction(
+            seed_byte,
+            Address::new([recipient_byte; novus::crypto::ADDRESS_SIZE]),
         )
-        .unwrap();
-
-        let recipient = Address::new([recipient_byte; novus::crypto::ADDRESS_SIZE]);
-
-        let intent = novus::transaction::SpendIntent::coin(
-            sender.address,
-            vec![novus::native::coin::XPQ::from_bytes(
-                [input_byte; novus::native::coin::XPQ::SIZE],
-            )],
-            vec![CoinOutput::new(recipient, Amount::from_atomic(10))],
-        )
-        .unwrap();
-
-        AuthorizedTransaction::Spend(Box::new(
-            novus::transaction::AuthorizedSpendTransaction {
-                spend: sender.sign_intent(intent).unwrap(),
-                payment: None,
-            },
-        ))
     };
 
     let transaction_one = make_transaction(0x42, 0x43, 0x44);
@@ -712,6 +561,7 @@ fn explorer_index_extends_after_canonical_append() {
         Height(1),
         ledger.tip_hash().expect("genesis tip"),
         target_bits,
+        1,
         Nonce(0),
         Some(Emission::new(miner, Amount::from_atomic(1))),
         vec![transaction_one],
@@ -739,6 +589,7 @@ fn explorer_index_extends_after_canonical_append() {
         Height(2),
         ledger.tip_hash().expect("height-one tip"),
         target_bits,
+        1,
         Nonce(0),
         Some(Emission::new(miner, Amount::from_atomic(1))),
         vec![transaction_two],
@@ -776,32 +627,11 @@ fn explorer_index_rebuilds_after_reorg_and_drops_orphan_transaction() {
 
     let miner_b = Address::new([0x52; novus::crypto::ADDRESS_SIZE]);
 
-    let make_transaction = |seed_byte: u8, input_byte: u8, recipient_byte: u8| {
-        let mnemonic = wallet::encode_bip39_mnemonic(&[seed_byte; 16]).unwrap();
-
-        let sender = wallet::wallet_from_bip39_mnemonic(
-            &mnemonic,
-            novus::crypto::Signature::Schnorr,
+    let make_transaction = |seed_byte: u8, _input_byte: u8, recipient_byte: u8| {
+        test_transaction(
+            seed_byte,
+            Address::new([recipient_byte; novus::crypto::ADDRESS_SIZE]),
         )
-        .unwrap();
-
-        let recipient = Address::new([recipient_byte; novus::crypto::ADDRESS_SIZE]);
-
-        let intent = novus::transaction::SpendIntent::coin(
-            sender.address,
-            vec![novus::native::coin::XPQ::from_bytes(
-                [input_byte; novus::native::coin::XPQ::SIZE],
-            )],
-            vec![CoinOutput::new(recipient, Amount::from_atomic(10))],
-        )
-        .unwrap();
-
-        AuthorizedTransaction::Spend(Box::new(
-            novus::transaction::AuthorizedSpendTransaction {
-                spend: sender.sign_intent(intent).unwrap(),
-                payment: None,
-            },
-        ))
     };
 
     let target_bits = ledger
@@ -819,6 +649,7 @@ fn explorer_index_rebuilds_after_reorg_and_drops_orphan_transaction() {
         Height(1),
         ledger.tip_hash().expect("genesis tip"),
         target_bits,
+        1,
         Nonce(0),
         Some(Emission::new(miner_a, Amount::from_atomic(1))),
         vec![transaction_a],
@@ -853,6 +684,7 @@ fn explorer_index_rebuilds_after_reorg_and_drops_orphan_transaction() {
         Height(1),
         ledger.tip_hash().expect("genesis tip after reorg"),
         target_bits,
+        1,
         Nonce(1),
         Some(Emission::new(miner_b, Amount::from_atomic(1))),
         vec![transaction_b],
@@ -893,31 +725,8 @@ fn explorer_address_index_rebuilds_after_reorg() {
     let recipient_a = Address::new([0x63; novus::crypto::ADDRESS_SIZE]);
     let recipient_b = Address::new([0x64; novus::crypto::ADDRESS_SIZE]);
 
-    let make_transaction = |seed_byte: u8, input_byte: u8, recipient: Address| {
-        let mnemonic = wallet::encode_bip39_mnemonic(&[seed_byte; 16]).unwrap();
-
-        let sender = wallet::wallet_from_bip39_mnemonic(
-            &mnemonic,
-            novus::crypto::Signature::Schnorr,
-        )
-        .unwrap();
-
-        let intent = novus::transaction::SpendIntent::coin(
-            sender.address,
-            vec![novus::native::coin::XPQ::from_bytes(
-                [input_byte; novus::native::coin::XPQ::SIZE],
-            )],
-            vec![CoinOutput::new(recipient, Amount::from_atomic(10))],
-        )
-        .unwrap();
-
-        AuthorizedTransaction::Spend(Box::new(
-            novus::transaction::AuthorizedSpendTransaction {
-                spend: sender.sign_intent(intent).unwrap(),
-                payment: None,
-            },
-        ))
-    };
+    let make_transaction =
+        |seed_byte: u8, _input_byte: u8, recipient: Address| test_transaction(seed_byte, recipient);
 
     let target_bits = ledger
         .chain
@@ -931,6 +740,7 @@ fn explorer_address_index_rebuilds_after_reorg() {
         Height(1),
         ledger.tip_hash().expect("genesis tip"),
         target_bits,
+        1,
         Nonce(0),
         Some(Emission::new(miner_a, Amount::from_atomic(1))),
         vec![transaction_a],
@@ -971,6 +781,7 @@ fn explorer_address_index_rebuilds_after_reorg() {
         Height(1),
         ledger.tip_hash().expect("genesis tip after reorg"),
         target_bits,
+        1,
         Nonce(1),
         Some(Emission::new(miner_b, Amount::from_atomic(1))),
         vec![transaction_b],
@@ -1092,6 +903,7 @@ fn explorer_address_pagination_uses_exclusive_cursor() {
             Height(height),
             ledger.tip_hash().expect("canonical tip"),
             target_bits,
+            1,
             Nonce(height),
             Some(Emission::new(miner, Amount::from_atomic(1))),
             vec![],
@@ -1202,32 +1014,11 @@ fn explorer_index_rebuilds_after_deep_reorg_to_longer_branch() {
 
     let miner = Address::new([0x71; novus::crypto::ADDRESS_SIZE]);
 
-    let make_transaction = |seed_byte: u8, input_byte: u8, recipient_byte: u8| {
-        let mnemonic = wallet::encode_bip39_mnemonic(&[seed_byte; 16]).unwrap();
-
-        let sender = wallet::wallet_from_bip39_mnemonic(
-            &mnemonic,
-            novus::crypto::Signature::Schnorr,
+    let make_transaction = |seed_byte: u8, _input_byte: u8, recipient_byte: u8| {
+        test_transaction(
+            seed_byte,
+            Address::new([recipient_byte; novus::crypto::ADDRESS_SIZE]),
         )
-        .unwrap();
-
-        let recipient = Address::new([recipient_byte; novus::crypto::ADDRESS_SIZE]);
-
-        let intent = novus::transaction::SpendIntent::coin(
-            sender.address,
-            vec![novus::native::coin::XPQ::from_bytes(
-                [input_byte; novus::native::coin::XPQ::SIZE],
-            )],
-            vec![CoinOutput::new(recipient, Amount::from_atomic(10))],
-        )
-        .unwrap();
-
-        AuthorizedTransaction::Spend(Box::new(
-            novus::transaction::AuthorizedSpendTransaction {
-                spend: sender.sign_intent(intent).unwrap(),
-                payment: None,
-            },
-        ))
     };
 
     let target_bits = ledger
@@ -1245,6 +1036,7 @@ fn explorer_index_rebuilds_after_deep_reorg_to_longer_branch() {
         Height(1),
         ledger.tip_hash().expect("genesis tip"),
         target_bits,
+        1,
         Nonce(0),
         Some(Emission::new(miner, Amount::from_atomic(1))),
         vec![transaction_a],
@@ -1257,6 +1049,7 @@ fn explorer_index_rebuilds_after_deep_reorg_to_longer_branch() {
         Height(2),
         ledger.tip_hash().expect("branch A height-one tip"),
         target_bits,
+        1,
         Nonce(0),
         Some(Emission::new(miner, Amount::from_atomic(1))),
         vec![],
@@ -1287,6 +1080,7 @@ fn explorer_index_rebuilds_after_deep_reorg_to_longer_branch() {
         Height(1),
         ledger.tip_hash().expect("genesis tip"),
         target_bits,
+        1,
         Nonce(1),
         Some(Emission::new(miner, Amount::from_atomic(1))),
         vec![transaction_b],
@@ -1300,6 +1094,7 @@ fn explorer_index_rebuilds_after_deep_reorg_to_longer_branch() {
             Height(height),
             ledger.tip_hash().expect("branch B tip"),
             target_bits,
+            1,
             Nonce(height),
             Some(Emission::new(miner, Amount::from_atomic(1))),
             vec![],
@@ -1344,6 +1139,7 @@ fn block_index_extends_and_rebuilds_after_reorg() {
         Height(1),
         ledger.tip_hash().expect("genesis tip"),
         target_bits,
+        1,
         Nonce(1),
         Some(Emission::new(miner, Amount::from_atomic(1))),
         vec![],
@@ -1367,6 +1163,7 @@ fn block_index_extends_and_rebuilds_after_reorg() {
         Height(2),
         ledger.tip_hash().expect("branch A tip"),
         target_bits,
+        1,
         Nonce(2),
         Some(Emission::new(miner, Amount::from_atomic(1))),
         vec![],
@@ -1396,6 +1193,7 @@ fn block_index_extends_and_rebuilds_after_reorg() {
         Height(1),
         ledger.tip_hash().expect("genesis tip after rollback"),
         target_bits,
+        1,
         Nonce(11),
         Some(Emission::new(miner, Amount::from_atomic(1))),
         vec![],
@@ -1411,6 +1209,7 @@ fn block_index_extends_and_rebuilds_after_reorg() {
             Height(height),
             ledger.tip_hash().expect("branch B tip"),
             target_bits,
+            1,
             Nonce(nonce),
             Some(Emission::new(miner, Amount::from_atomic(1))),
             vec![],

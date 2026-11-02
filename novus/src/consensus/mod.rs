@@ -14,6 +14,6 @@ pub use policy::*;
 pub use pow::*;
 pub use transaction::*;
 
-pub use crate::transaction::{AtomicAmount, DECIMALS, Amount};
+pub use crate::transaction::{Amount, AtomicAmount, DECIMALS};
 
 pub use target::{PoWTarget, hash_meets_target};

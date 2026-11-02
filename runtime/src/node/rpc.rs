@@ -125,10 +125,46 @@ pub(super) fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> 
             let emission = expected_next_emission(&ledger)?;
             serde_json::json!({
                 "minimum_fee_rate_atomic_units_per_byte": MIN_RELAY_FEE_ATOMIC_UNITS_PER_BYTE,
-                "fee_currency_policy": "sender_race_native_currency",
+                "fee_currency_policy": {
+                    "race_currency_transfer": "gold",
+                    "conversion": "source_currency",
+                    "gold": "gold",
+                    "novus": "novus"
+                },
+                "tax_currency_policy": {
+                    "race_currency": "same_as_transferred_or_converted_currency",
+                    "gold": "gold",
+                    "gold_to_novus": "gold",
+                    "novus": "none"
+                },
+                "novus_transfer_tax_percent": 0,
+                "transaction_tax_rates_percent": {
+                    "base_race_currency_transfer": novus::consensus::TRANSFER_TAX_PERCENT,
+                    "base_race_currency_to_gold_conversion": novus::consensus::RACE_TO_GOLD_CONVERSION_TAX_PERCENT,
+                    "base_gold_transfer": novus::consensus::GOLD_TRANSFER_TAX_PERCENT,
+                    "base_gold_to_race_currency_conversion": novus::consensus::GOLD_TO_RACE_CONVERSION_TAX_PERCENT,
+                    "base_gold_to_novus_conversion": novus::consensus::GOLD_TO_NOVUS_CONVERSION_TAX_PERCENT,
+                    "novus_transfer": 0
+                },
+                "race_tax_modifier_percent_points": ledger.state().chip_war.tax_rates.iter().map(|(race, rate)| (format!("{race:?}").to_lowercase(), rate)).collect::<std::collections::BTreeMap<_, _>>(),
+                "race_tax_modifier_applies_to": ["race_currency_transfer", "race_currency_to_gold_conversion", "gold_transfer", "gold_to_race_currency_conversion", "gold_to_novus_conversion"],
+                "race_tax_adjustment_percent_points": {
+                    "loss_increase": novus::ledger::RACE_TAX_LOSS_INCREASE_PERCENT,
+                    "failure_increase": novus::ledger::RACE_TAX_FAILURE_INCREASE_PERCENT,
+                    "win_decrease": novus::ledger::RACE_TAX_WIN_DECREASE_PERCENT,
+                    "minimum": novus::ledger::MIN_RACE_TAX_MODIFIER_PERCENT,
+                    "maximum": novus::ledger::MAX_RACE_TAX_MODIFIER_PERCENT,
+                    "effective_tax_cap": novus::ledger::MAX_EFFECTIVE_TAX_PERCENT
+                },
+                "minimum_relay_fee_currency_policy": "same_as_transaction_fee_currency",
+                "relay_fee_distribution_policy": {
+                    "novus": "credited_directly_to_miner_of_including_block_any_race",
+                    "gold": "tax_vault_claimed_by_eligible_miners"
+                },
+                "gold_transfer_policy": "sender_race_only",
+                "novus_transfer_policy": "global_any_race",
+                "mixed_currency_transfers_allowed": false,
                 "next_block_emission": emission.as_atomic(),
-                "protocol_transfer_tax_percent": novus::consensus::TRANSFER_TAX_PERCENT,
-                "race_tax_rates_percent": ledger.state().chip_war.tax_rates.iter().map(|(race, rate)| (format!("{race:?}").to_lowercase(), rate)).collect::<std::collections::BTreeMap<_, _>>(),
                 "race_exchange_rate_units_per_gold": novus::transaction::Race::all().into_iter().map(|race| (format!("{race:?}").to_lowercase(), ledger.state().chip_war.exchange_rate(race))).collect::<std::collections::BTreeMap<_, _>>(),
                 "race_currency_to_gold": {
                     "base_rate": novus::transaction::RACE_CURRENCY_PER_GOLD,
@@ -139,6 +175,20 @@ pub(super) fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> 
                         "cora": "disena"
                     },
                     "directions": ["race_currency_to_gold", "gold_to_wallet_race_currency"],
+                    "uses_exchange_vault": true
+                },
+                "global_gold_to_novus": {
+                    "gold_per_quote": 1,
+                    "gold_per_novus": novus::transaction::GOLD_PER_NOVUS,
+                    "gold_supply_cap_atomic": novus::ledger::GOLD_SUPPLY_CAP.as_atomic(),
+                    "gold_converted_this_cycle_atomic": ledger.state().global_currency.gold_converted_this_cycle.as_atomic(),
+                    "total_gold_burned_atomic": ledger.state().global_currency.total_gold_burned.as_atomic(),
+                    "total_novus_minted_atomic": ledger.state().global_currency.total_novus_minted.as_atomic(),
+                    "refill_after_cumulative_gold_conversion_atomic": novus::ledger::GOLD_SUPPLY_CAP.as_atomic(),
+                    "direction": "gold_to_novus",
+                    "reverse_supported": false,
+                    "burns_input_gold": true,
+                    "refills_global_gold_exchange_vault": true,
                     "uses_exchange_vault": true
                 },
                 "block_reward_currency_by_race": {
@@ -158,11 +208,16 @@ pub(super) fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> 
         }
         route if route.starts_with("/race/") => {
             let address = parse_address(route.trim_start_matches("/race/"))?;
-            let race = ledger.state().accounts.get(address).race.map(|race| match race {
-                novus::transaction::Race::Accretia => "accretia",
-                novus::transaction::Race::Bellato => "bellato",
-                novus::transaction::Race::Cora => "cora",
-            });
+            let race = ledger
+                .state()
+                .accounts
+                .get(address)
+                .race
+                .map(|race| match race {
+                    novus::transaction::Race::Accretia => "accretia",
+                    novus::transaction::Race::Bellato => "bellato",
+                    novus::transaction::Race::Cora => "cora",
+                });
             serde_json::json!({"race": race})
         }
         route if route.starts_with("/block/") => {

@@ -104,10 +104,7 @@ pub(super) fn reconcile_mempool(
         else {
             continue;
         };
-        if state
-            .apply_validated_transaction(&validated)
-            .is_err()
-        {
+        if state.apply_validated_transaction(&validated).is_err() {
             continue;
         }
         retained.push(transaction);
@@ -139,7 +136,7 @@ pub(super) fn validate_mempool(
         if paid_fee < required_fee {
             return Err(format!(
                 "mempool transaction fee in {:?} is too low: paid {paid_fee} atomic units, required {required_fee} atomic units for {} bytes",
-                novus::transaction::Currency::for_race_reward(transaction.intent.race),
+                transaction.intent.fee_currency(),
                 encoded.len()
             ));
         }

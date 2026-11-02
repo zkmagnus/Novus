@@ -1,4 +1,5 @@
 use borsh::{BorshDeserialize, BorshSerialize};
+use secp256k1::hashes::{Hash as BitcoinHash, sha256};
 use serde::de::{Error as DeError, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha3::{Digest, Sha3_256};
@@ -256,6 +257,15 @@ impl HashDomain {
 
 pub fn hash_bytes(bytes: &[u8]) -> Hash {
     domain(HashDomain::Raw, bytes)
+}
+
+/// Computes Bitcoin-style SHA256d and returns the digest in canonical
+/// big-endian order for proof-of-work target comparison.
+pub fn bitcoin_double_sha256(bytes: &[u8]) -> PoWHash {
+    let first = sha256::Hash::hash(bytes);
+    let mut digest = sha256::Hash::hash(first.as_ref()).to_byte_array();
+    digest.reverse();
+    PoWHash(digest)
 }
 
 pub fn domain(domain: HashDomain, bytes: &[u8]) -> Hash {

@@ -1,110 +1,32 @@
-//! novus proof-of-work construction.
+//! Bitcoin-style double-SHA-256 proof of work.
 
 use crate::{
     blockchain::{Header, block_header_bytes},
     consensus::{ConsensusError, PoWTarget},
 };
+use crypto::{PoWHash, bitcoin_double_sha256};
 
-use crypto::{
-    CryptoError, Hash, HashDomain, PoWHash, PoWMemory, PreviousHash,
-    argon2::{argon2id_pow_hash, argon2id_pow_hash_with_memory},
-    domain,
-};
-
-pub const POW_ALGORITHM: &str = "novus-argon2id-algorithm";
-
-// Consensus parameters. Do not change on an existing chain without a hard fork.
-pub const POW_ARGON2_MEMORY_KIB: u32 = 64 * 1024;
-pub const POW_ARGON2_ITERATIONS: u32 = 1;
-pub const POW_ARGON2_LANES: u32 = 2;
-
-pub fn new_pow_memory() -> PoWMemory {
-    PoWMemory::new(POW_ARGON2_MEMORY_KIB)
-}
-
-pub fn pow_seed(header: &Header) -> Result<Hash, ConsensusError> {
-    let bytes = block_header_bytes(header).map_err(|_| ConsensusError::PoWHashFailed)?;
-    Ok(domain(HashDomain::PoWSeed, &bytes))
-}
-
-pub fn pow_salt(previous_hash: &PreviousHash) -> Hash {
-    domain(HashDomain::PoWSalt, previous_hash.as_bytes())
-}
+pub const POW_ALGORITHM: &str = "bitcoin-sha256d-header-target-v1";
 
 pub fn calculate_work(header: &Header) -> Result<PoWHash, ConsensusError> {
-    let seed = pow_seed(header)?;
-    let salt = pow_salt(&header.previous_hash);
-
-    argon2id_pow_hash(
-        &seed.0,
-        &salt.0,
-        POW_ARGON2_MEMORY_KIB,
-        POW_ARGON2_ITERATIONS,
-        POW_ARGON2_LANES,
-    )
-    .map_err(map_crypto_error)
-}
-
-pub fn calculate_work_with_memory(
-    header: &Header,
-    memory: &mut PoWMemory,
-) -> Result<PoWHash, ConsensusError> {
-    let seed = pow_seed(header)?;
-    let salt = pow_salt(&header.previous_hash);
-
-    argon2id_pow_hash_with_memory(
-        &seed.0,
-        &salt.0,
-        POW_ARGON2_ITERATIONS,
-        POW_ARGON2_LANES,
-        memory,
-    )
-    .map_err(map_crypto_error)
+    let bytes = block_header_bytes(header).map_err(|_| ConsensusError::PoWHashFailed)?;
+    Ok(bitcoin_double_sha256(&bytes))
 }
 
 pub fn verify_pow(header: &Header, expected_difficulty: u32) -> Result<(), ConsensusError> {
-    validate_pow_claim(header, expected_difficulty)?;
-    verify_pow_hash(calculate_work(header)?, expected_difficulty)
-}
-
-pub fn verify_pow_with_memory(
-    header: &Header,
-    expected_difficulty: u32,
-    memory: &mut PoWMemory,
-) -> Result<(), ConsensusError> {
-    validate_pow_claim(header, expected_difficulty)?;
-    verify_pow_hash(
-        calculate_work_with_memory(header, memory)?,
-        expected_difficulty,
-    )
-}
-
-fn validate_pow_claim(header: &Header, expected_target_bits: u32) -> Result<(), ConsensusError> {
-    if PoWTarget::from_compact(expected_target_bits).is_none() {
+    if PoWTarget::from_compact(expected_difficulty).is_none() {
         return Err(ConsensusError::InvalidDifficulty);
     }
 
-    if header.target_bits != expected_target_bits {
+    if header.target_bits != expected_difficulty {
         return Err(ConsensusError::UnexpectedDifficulty);
     }
 
-    Ok(())
-}
-
-fn verify_pow_hash(hash: PoWHash, expected_target_bits: u32) -> Result<(), ConsensusError> {
     let target =
-        PoWTarget::from_compact(expected_target_bits).ok_or(ConsensusError::InvalidDifficulty)?;
-
-    if target.meets(&hash) {
+        PoWTarget::from_compact(expected_difficulty).ok_or(ConsensusError::InvalidDifficulty)?;
+    if target.meets(&calculate_work(header)?) {
         Ok(())
     } else {
         Err(ConsensusError::InsufficientPoW)
-    }
-}
-
-fn map_crypto_error(error: CryptoError) -> ConsensusError {
-    match error {
-        CryptoError::InvalidPoWParameters => ConsensusError::InvalidPoWParameters,
-        _ => ConsensusError::PoWHashFailed,
     }
 }

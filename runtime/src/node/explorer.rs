@@ -124,9 +124,17 @@ pub(super) fn explorer_address_response(
                     .get(transaction_index)
                     .ok_or("indexed activity transaction is missing from its block")?;
 
-                let tax_rate = historical_race_tax_rate(ledger, block.height().0, transaction.intent.race);
-                let exchange_rate = historical_exchange_rate(ledger, block.height().0, transaction.intent.race);
-                if let Some(activity) = address_transaction_activity(transaction, address, block, tax_rate, exchange_rate)? {
+                let tax_rate =
+                    historical_race_tax_rate(ledger, block.height().0, transaction.intent.race);
+                let exchange_rate =
+                    historical_exchange_rate(ledger, block.height().0, transaction.intent.race);
+                if let Some(activity) = address_transaction_activity(
+                    transaction,
+                    address,
+                    block,
+                    tax_rate,
+                    exchange_rate,
+                )? {
                     activities.push(activity);
                 }
             }
@@ -154,16 +162,29 @@ pub(super) fn address_transaction_activity(
     transaction: &Transaction,
     address: Address,
     block: &Block,
-    tax_rate: u8,
+    _tax_rate: u8,
     exchange_rate: u128,
 ) -> Result<Option<serde_json::Value>, String> {
     if let Some(conversion) = transaction.intent.conversion {
-        if transaction.intent.sender != address { return Ok(None); }
-        let (output_currency, output_amount) = if conversion.from == novus::transaction::Currency::Gold {
-            (novus::transaction::Currency::for_race_reward(transaction.intent.race), novus::transaction::exchange_output_amount(conversion.amount.as_atomic(), true, exchange_rate).unwrap_or_default())
+        if transaction.intent.sender != address {
+            return Ok(None);
+        }
+        let conversion_rate = if (conversion.from, conversion.to)
+            == (
+                novus::transaction::Currency::Gold,
+                novus::transaction::Currency::Novus,
+            ) {
+            novus::transaction::GOLD_PER_NOVUS
         } else {
-            (novus::transaction::Currency::Gold, novus::transaction::exchange_output_amount(conversion.amount.as_atomic(), false, exchange_rate).unwrap_or_default())
+            exchange_rate
         };
+        let output_amount = novus::transaction::conversion_output_amount(
+            conversion.amount.as_atomic(),
+            conversion.from,
+            conversion.to,
+            conversion_rate,
+        )
+        .unwrap_or_default();
         return Ok(Some(serde_json::json!({
             "height": block.height().0,
             "block_hash": hex::encode(block.hash().map_err(|error| error.to_string())?.0),
@@ -172,13 +193,15 @@ pub(super) fn address_transaction_activity(
             "direction": "convert",
             "amount": conversion.amount.as_atomic(),
             "currency": format!("{:?}", conversion.from).to_lowercase(),
-            "output_currency": format!("{:?}", output_currency).to_lowercase(),
+            "output_currency": format!("{:?}", conversion.to).to_lowercase(),
             "output_amount": output_amount,
-            "exchange_rate_units_per_gold": exchange_rate,
-            "protocol_tax": transaction_tax_json(transaction, tax_rate),
-            "tax_vault_credit": tax_vault_credit_json(transaction, tax_rate),
+            "exchange_rate_units_per_gold": conversion_rate,
+            "protocol_tax": transaction_tax_json(transaction),
+            "tax_vault_credit": tax_vault_credit_json(transaction),
+            "tax": transaction.intent.tax.as_atomic(),
+            "tax_currency": format!("{:?}", conversion.from).to_lowercase(),
             "fee": transaction.intent.fee.as_atomic(),
-            "fee_currency": format!("{:?}", novus::transaction::Currency::for_race_reward(transaction.intent.race)).to_lowercase(),
+            "fee_currency": format!("{:?}", transaction.intent.fee_currency()).to_lowercase(),
             "size_bytes": canonical_bytes(transaction).map_err(|error| error.to_string())?.len(),
         })));
     }
@@ -220,10 +243,12 @@ pub(super) fn address_transaction_activity(
         "type": transaction_kind(transaction),
         "direction": direction,
         "amount": amount.as_atomic(),
-        "protocol_tax": transaction_tax_json(transaction, tax_rate),
-        "tax_vault_credit": tax_vault_credit_json(transaction, tax_rate),
+        "protocol_tax": transaction_tax_json(transaction),
+        "tax_vault_credit": tax_vault_credit_json(transaction),
+        "tax": transaction.intent.tax.as_atomic(),
+        "tax_currency": transaction.intent.transfers.first().map(|transfer| format!("{:?}", transfer.currency).to_lowercase()),
         "fee": transaction.intent.fee.as_atomic(),
-        "fee_currency": format!("{:?}", novus::transaction::Currency::for_race_reward(transaction.intent.race)).to_lowercase(),
+        "fee_currency": format!("{:?}", transaction.intent.fee_currency()).to_lowercase(),
         "message": transaction.intent.message.as_deref(),
         "size_bytes": canonical_bytes(transaction).map_err(|error| error.to_string())?.len(),
     })))
@@ -273,30 +298,51 @@ pub(super) fn explorer_transaction_response(
     }))
 }
 
-pub(super) fn transaction_response(transaction: &Transaction, tax_rate: u8, exchange_rate: u128) -> serde_json::Value {
+pub(super) fn transaction_response(
+    transaction: &Transaction,
+    tax_rate: u8,
+    exchange_rate: u128,
+) -> serde_json::Value {
     spend_transaction_response(transaction, tax_rate, exchange_rate)
 }
 
-pub(super) fn spend_transaction_response(transaction: &Transaction, tax_rate: u8, exchange_rate: u128) -> serde_json::Value {
+pub(super) fn spend_transaction_response(
+    transaction: &Transaction,
+    _tax_rate: u8,
+    exchange_rate: u128,
+) -> serde_json::Value {
     let intent = &transaction.intent;
     let conversion = intent.conversion.map(|conversion| {
-        let (to, output_amount) = if conversion.from == novus::transaction::Currency::Gold {
-            (novus::transaction::Currency::for_race_reward(intent.race), novus::transaction::exchange_output_amount(conversion.amount.as_atomic(), true, exchange_rate).unwrap_or_default())
+        let rate = if (conversion.from, conversion.to)
+            == (
+                novus::transaction::Currency::Gold,
+                novus::transaction::Currency::Novus,
+            ) {
+            novus::transaction::GOLD_PER_NOVUS
         } else {
-            (novus::transaction::Currency::Gold, novus::transaction::exchange_output_amount(conversion.amount.as_atomic(), false, exchange_rate).unwrap_or_default())
+            exchange_rate
         };
+        let output_amount = novus::transaction::conversion_output_amount(
+            conversion.amount.as_atomic(),
+            conversion.from,
+            conversion.to,
+            rate,
+        )
+        .unwrap_or_default();
         serde_json::json!({
             "from": format!("{:?}", conversion.from).to_lowercase(),
             "input_amount": conversion.amount.as_atomic(),
-            "to": format!("{:?}", to).to_lowercase(),
+            "to": format!("{:?}", conversion.to).to_lowercase(),
             "output_amount": output_amount,
-            "rate": exchange_rate,
+            "rate": rate,
         })
     });
     serde_json::json!({
         "type": transaction_kind(transaction),
-        "protocol_tax": transaction_tax_json(transaction, tax_rate),
-        "tax_vault_credit": tax_vault_credit_json(transaction, tax_rate),
+        "protocol_tax": transaction_tax_json(transaction),
+        "tax_vault_credit": tax_vault_credit_json(transaction),
+        "tax": intent.tax.as_atomic(),
+        "tax_currency": intent.conversion.map(|conversion| conversion.from).or_else(|| intent.transfers.first().map(|transfer| transfer.currency)).map(|currency| format!("{currency:?}").to_lowercase()),
         "message": intent.message.as_deref(),
         "signer": novus::crypto::address_to_string(&intent.sender, intent.sender.race().prefix()),
         "nonce": intent.nonce,
@@ -307,7 +353,7 @@ pub(super) fn spend_transaction_response(transaction: &Transaction, tax_rate: u8
         })).collect::<Vec<_>>(),
         "conversion": conversion,
         "fee": intent.fee.as_atomic(),
-        "fee_currency": format!("{:?}", novus::transaction::Currency::for_race_reward(intent.race)).to_lowercase(),
+        "fee_currency": format!("{:?}", intent.fee_currency()).to_lowercase(),
     })
 }
 
@@ -324,41 +370,90 @@ pub(super) fn checked_output_sum(
 }
 
 pub(super) fn transaction_kind(transaction: &Transaction) -> &'static str {
-    if transaction.intent.conversion.is_some() { "conversion" } else { "transfer" }
+    if transaction.intent.conversion.is_some() {
+        "conversion"
+    } else {
+        "transfer"
+    }
 }
 
-fn transaction_tax_json(transaction: &Transaction, tax_rate: u8) -> std::collections::BTreeMap<String, u128> {
-    novus::consensus::calculate_transfer_taxes_with_rates(&transaction.intent, |_| tax_rate)
+fn transaction_tax_json(transaction: &Transaction) -> std::collections::BTreeMap<String, u128> {
+    if transaction.intent.tax.is_zero() {
+        return std::collections::BTreeMap::new();
+    }
+    let currency = transaction
+        .intent
+        .conversion
+        .map(|conversion| conversion.from)
+        .or_else(|| {
+            transaction
+                .intent
+                .transfers
+                .first()
+                .map(|transfer| transfer.currency)
+        });
+    currency
+        .map(|currency| {
+            std::collections::BTreeMap::from([(
+                format!("{currency:?}").to_lowercase(),
+                transaction.intent.tax.as_atomic(),
+            )])
+        })
         .unwrap_or_default()
-        .into_iter()
-        .map(|(currency, amount)| (format!("{currency:?}").to_lowercase(), amount.as_atomic()))
-        .collect()
 }
 
-fn tax_vault_credit_json(transaction: &Transaction, tax_rate: u8) -> std::collections::BTreeMap<String, u128> {
-    let mut credits = transaction_tax_json(transaction, tax_rate);
-    let fee_currency = novus::transaction::Currency::for_race_reward(transaction.intent.race);
+fn tax_vault_credit_json(transaction: &Transaction) -> std::collections::BTreeMap<String, u128> {
+    let mut credits = transaction_tax_json(transaction);
+    let fee_currency = transaction.intent.fee_currency();
+    if fee_currency == novus::transaction::Currency::Novus {
+        return credits;
+    }
     let key = format!("{fee_currency:?}").to_lowercase();
-    let amount = credits.get(&key).copied().unwrap_or_default()
+    let amount = credits
+        .get(&key)
+        .copied()
+        .unwrap_or_default()
         .saturating_add(transaction.intent.fee.as_atomic());
-    if amount > 0 { credits.insert(key, amount); }
+    if amount > 0 {
+        credits.insert(key, amount);
+    }
     credits
 }
 
-fn historical_race_tax_rate(ledger: &Ledger, block_height: u64, race: novus::transaction::Race) -> u8 {
+fn historical_race_tax_rate(
+    ledger: &Ledger,
+    block_height: u64,
+    race: novus::transaction::Race,
+) -> u8 {
     let mut state = novus::ledger::ChipWarState::default();
-    for block in ledger.chain.blocks().filter(|block| block.height().0 < block_height && !block.is_genesis()) {
+    for block in ledger
+        .chain
+        .blocks()
+        .filter(|block| block.height().0 < block_height && !block.is_genesis())
+    {
         let miner_race = novus::transaction::Race::from(block.miner_address().race());
-        if state.record_block(block.height().0, miner_race).is_none() { break; }
+        if state.record_block(block.height().0, miner_race).is_none() {
+            break;
+        }
     }
     state.tax_rate(race)
 }
 
-fn historical_exchange_rate(ledger: &Ledger, block_height: u64, race: novus::transaction::Race) -> u128 {
+fn historical_exchange_rate(
+    ledger: &Ledger,
+    block_height: u64,
+    race: novus::transaction::Race,
+) -> u128 {
     let mut state = novus::ledger::ChipWarState::default();
-    for block in ledger.chain.blocks().filter(|block| block.height().0 < block_height && !block.is_genesis()) {
+    for block in ledger
+        .chain
+        .blocks()
+        .filter(|block| block.height().0 < block_height && !block.is_genesis())
+    {
         let miner_race = novus::transaction::Race::from(block.miner_address().race());
-        if state.record_block(block.height().0, miner_race).is_none() { break; }
+        if state.record_block(block.height().0, miner_race).is_none() {
+            break;
+        }
     }
     state.exchange_rate(race)
 }
@@ -376,6 +471,7 @@ pub(super) fn status_response(
         .total_mined
         .checked_sub(novus.total_burned)
         .ok_or("total burned exceeds total mined")?;
+    let currency_supply = currency_supply(ledger)?;
 
     Ok(serde_json::json!({
         "tip_height": tip_height.0,
@@ -387,19 +483,62 @@ pub(super) fn status_response(
         "total_mined": novus.total_mined.as_atomic(),
         "total_burned": novus.total_burned.as_atomic(),
         "total_supply": total_supply.as_atomic(),
+        "currency_supply": currency_supply.iter().map(|(currency, amount)| (format!("{currency:?}").to_lowercase(), amount.as_atomic())).collect::<std::collections::BTreeMap<_, _>>(),
+        "gold_conversion_cycle": {
+            "cap_atomic": novus::ledger::GOLD_SUPPLY_CAP.as_atomic(),
+            "converted_atomic": ledger.state().global_currency.gold_converted_this_cycle.as_atomic(),
+            "total_gold_burned_atomic": ledger.state().global_currency.total_gold_burned.as_atomic(),
+            "total_novus_minted_atomic": ledger.state().global_currency.total_novus_minted.as_atomic()
+        },
         "race_block_rewards": novus.race_rewards.iter().map(|(currency, amount)| (format!("{currency:?}").to_lowercase(), amount.as_atomic())).collect::<std::collections::BTreeMap<_, _>>(),
+        "race_tax_modifier_percent_points": ledger.state().chip_war.tax_rates.iter().map(|(race, rate)| (format!("{race:?}").to_lowercase(), rate)).collect::<std::collections::BTreeMap<_, _>>(),
         "tax_vault": ledger.state().tax_vault.balances().iter().map(|(currency, amount)| (format!("{currency:?}").to_lowercase(), amount.as_atomic())).collect::<std::collections::BTreeMap<_, _>>(),
         "exchange_vault": ledger.state().exchange_vault.balances().iter().map(|(currency, amount)| (format!("{currency:?}").to_lowercase(), amount.as_atomic())).collect::<std::collections::BTreeMap<_, _>>(),
         "chip_war": {
+            "epoch_seconds": novus::ledger::CHIP_WAR_EPOCH_SECONDS,
             "epoch_blocks": novus::ledger::CHIP_WAR_EPOCH_BLOCKS,
             "completed_epochs": ledger.state().chip_war.completed_epochs,
             "blocks_in_current_epoch": ledger.state().chip_war.block_counts.iter().map(|(race, count)| (format!("{race:?}").to_lowercase(), count)).collect::<std::collections::BTreeMap<_, _>>(),
-            "race_tax_rates_percent": ledger.state().chip_war.tax_rates.iter().map(|(race, rate)| (format!("{race:?}").to_lowercase(), rate)).collect::<std::collections::BTreeMap<_, _>>(),
             "race_exchange_rates_units_per_gold": novus::transaction::Race::all().into_iter().map(|race| (format!("{race:?}").to_lowercase(), ledger.state().chip_war.exchange_rate(race))).collect::<std::collections::BTreeMap<_, _>>(),
             "race_exchange_rate_adjustments_percent": ledger.state().chip_war.exchange_rate_adjustments.iter().map(|(race, adjustment)| (format!("{race:?}").to_lowercase(), adjustment)).collect::<std::collections::BTreeMap<_, _>>(),
             "last_outcomes": ledger.state().chip_war.last_outcomes.iter().map(|(race, outcome)| (format!("{race:?}").to_lowercase(), format!("{outcome:?}").to_lowercase())).collect::<std::collections::BTreeMap<_, _>>(),
         },
     }))
+}
+
+fn currency_supply(
+    ledger: &Ledger,
+) -> Result<std::collections::BTreeMap<novus::transaction::Currency, Amount>, String> {
+    let mut supply = novus::transaction::Currency::all()
+        .into_iter()
+        .map(|currency| (currency, Amount::ZERO))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for (_, account) in ledger.state().accounts.iter() {
+        for (&currency, &amount) in &account.balances {
+            let total = supply
+                .get(&currency)
+                .copied()
+                .unwrap_or(Amount::ZERO)
+                .checked_add(amount)
+                .ok_or("currency supply overflow")?;
+            supply.insert(currency, total);
+        }
+    }
+    for vault in [
+        ledger.state().tax_vault.balances(),
+        ledger.state().exchange_vault.balances(),
+    ] {
+        for (&currency, &amount) in vault {
+            let total = supply
+                .get(&currency)
+                .copied()
+                .unwrap_or(Amount::ZERO)
+                .checked_add(amount)
+                .ok_or("currency supply overflow")?;
+            supply.insert(currency, total);
+        }
+    }
+    Ok(supply)
 }
 
 pub(super) fn latest_blocks_response(ledger: &Ledger) -> Result<serde_json::Value, String> {

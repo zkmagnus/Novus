@@ -2,7 +2,6 @@
 resolver = "3"
 members = []
 exclude = [
-    "argon2/*",
     "proc-macro/*",
     "sha3/*",
     "traits/*",

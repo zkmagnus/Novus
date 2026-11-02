@@ -12,6 +12,7 @@ name = "novus"
 [features]
 default = ["mainnet"]
 mainnet = ["crypto/mainnet"]
+test-utils = []
 
 [dependencies]
 borsh.workspace = true

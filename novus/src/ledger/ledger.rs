@@ -28,7 +28,6 @@ pub struct Ledger {
 }
 
 struct ExecutedBlock {
-    state: LedgerState,
     journals: Vec<StateRollbackJournal>,
     state_root: StateRoot,
     block_size: u32,
@@ -64,46 +63,68 @@ impl Ledger {
         &self,
         block: &Block,
     ) -> Result<(StateRoot, u32), LedgerError> {
-        let executed = self.execute_block(block)?;
+        let chain_context = self.chain_context_for(block)?;
+        let mut staged_state = self.state.clone();
+        let executed = Self::execute_block(&mut staged_state, block, chain_context)?;
         Ok((executed.state_root, executed.block_size))
     }
 
-    fn execute_block(&self, block: &Block) -> Result<ExecutedBlock, LedgerError> {
-        let mut state = self.state.clone();
+    fn chain_context_for(&self, block: &Block) -> Result<ChainContext, LedgerError> {
+        match self.chain_context {
+            Some(context) => Ok(context),
+            None if block.is_genesis() => Ok(ChainContext::new(block.hash()?.into_bytes())),
+            None => Err(LedgerError::EmptyChain),
+        }
+    }
+
+    fn execute_block(
+        state: &mut LedgerState,
+        block: &Block,
+        chain_context: ChainContext,
+    ) -> Result<ExecutedBlock, LedgerError> {
         let mut journals = Vec::new();
         let block_size = u32::try_from(block.size()?).map_err(|_| LedgerError::InvalidBlockSize)?;
         let height = block.height();
-        let chain_context = match self.chain_context {
-            Some(context) => context,
-            None if block.is_genesis() => ChainContext::new(block.hash()?.into_bytes()),
-            None => return Err(LedgerError::EmptyChain),
+
+        let result = (|| {
+            if !block.is_genesis() {
+                let emission = validate_emission(block)?;
+                journals.push(state.apply_emission(
+                    emission.recipient(),
+                    emission.currency(),
+                    emission.subsidy(),
+                )?);
+            }
+
+            for transaction in block.transactions() {
+                let validated =
+                    validate_transaction(transaction.clone(), chain_context, height.0, state)?;
+                journals.push(state.apply_validated_transaction_with_miner(
+                    &validated,
+                    Some(block.miner_address()),
+                )?);
+            }
+
+            if !block.is_genesis() {
+                journals.push(state.record_chip_war_block(
+                    height.0,
+                    crate::transaction::Race::from(block.miner_address().race()),
+                )?);
+            }
+
+            state.application_state_root()
+        })();
+
+        let state_root = match result {
+            Ok(state_root) => state_root,
+            Err(error) => {
+                for journal in journals.into_iter().rev() {
+                    state.rollback_state(journal)?;
+                }
+                return Err(error);
+            }
         };
-
-        if !block.is_genesis() {
-            let emission = validate_emission(block)?;
-            journals.push(state.apply_emission(
-                emission.recipient(),
-                emission.currency(),
-                emission.subsidy(),
-            )?);
-        }
-
-        for transaction in block.transactions() {
-            let validated =
-                validate_transaction(transaction.clone(), chain_context, height.0, &state)?;
-            journals.push(state.apply_validated_transaction(&validated)?);
-        }
-
-        if !block.is_genesis() {
-            journals.push(state.record_chip_war_block(
-                height.0,
-                crate::transaction::Race::from(block.miner_address().race()),
-            )?);
-        }
-
-        let state_root = state.application_state_root()?;
         Ok(ExecutedBlock {
-            state,
             journals,
             state_root,
             block_size,
@@ -125,19 +146,11 @@ impl Ledger {
             .cloned()
             .ok_or(LedgerError::MissingRollbackJournal)?;
 
-        let mut staged_state = self.state.clone();
-
         for journal in journals.into_iter().rev() {
-            staged_state.rollback_state(journal)?;
+            self.state.rollback_state(journal)?;
         }
 
-        let mut staged_chain = self.chain.clone();
-
-        let block = staged_chain.remove_tip(hash)?;
-
-        self.state = staged_state;
-
-        self.chain = staged_chain;
+        let block = self.chain.remove_tip(hash)?;
 
         self.journals.remove(&height);
 
@@ -151,18 +164,28 @@ impl Ledger {
     fn apply_validated_block(&mut self, validated: ValidatedBlock) -> Result<(), LedgerError> {
         let block = validated.block();
         let height = block.height();
-        let executed = self.execute_block(block)?;
+        self.chain.validate_next_block(block)?;
+        let chain_context = self.chain_context_for(block)?;
+        let executed = Self::execute_block(&mut self.state, block, chain_context)?;
 
         if executed.block_size != block.block_size() {
+            for journal in executed.journals.into_iter().rev() {
+                self.state.rollback_state(journal)?;
+            }
             return Err(LedgerError::InvalidBlockSize);
         }
         if block.state_root() != executed.state_root {
+            for journal in executed.journals.into_iter().rev() {
+                self.state.rollback_state(journal)?;
+            }
             return Err(LedgerError::InvalidStateRoot);
         }
-        let mut staged_chain = self.chain.clone();
-        staged_chain.insert_block(block.clone())?;
-        self.state = executed.state;
-        self.chain = staged_chain;
+        if let Err(error) = self.chain.insert_block(validated.into_block()) {
+            for journal in executed.journals.into_iter().rev() {
+                self.state.rollback_state(journal)?;
+            }
+            return Err(error.into());
+        }
         self.chain_context = Some(executed.chain_context);
         self.journals.insert(height, executed.journals);
         self.finalized_height = self
@@ -193,7 +216,11 @@ impl ApplyBlockState for Ledger {
 //
 
 impl TransactionStateView for LedgerState {
-    fn balance(&self, address: crypto::Address, currency: crate::transaction::Currency) -> crate::transaction::Amount {
+    fn balance(
+        &self,
+        address: crypto::Address,
+        currency: crate::transaction::Currency,
+    ) -> crate::transaction::Amount {
         self.accounts.balance_of(address, currency)
     }
     fn nonce(&self, address: crypto::Address) -> u64 {
@@ -202,7 +229,10 @@ impl TransactionStateView for LedgerState {
     fn race(&self, address: crypto::Address) -> Option<crate::transaction::Race> {
         self.accounts.get(address).race
     }
-    fn exchange_vault_balance(&self, currency: crate::transaction::Currency) -> crate::transaction::Amount {
+    fn exchange_vault_balance(
+        &self,
+        currency: crate::transaction::Currency,
+    ) -> crate::transaction::Amount {
         self.exchange_vault.balance(currency)
     }
     fn race_tax_rate(&self, race: crate::transaction::Race) -> u8 {
@@ -224,13 +254,21 @@ impl LedgerState {
             && self.novus.total_burned.is_zero()
             && self.novus.race_rewards.is_empty()
             && self.tax_vault.balances().is_empty()
-            && self.exchange_vault.balances().is_empty()
+            && self.exchange_vault == crate::ledger::ExchangeVault::default()
             && self.chip_war == crate::ledger::ChipWarState::default()
+            && self.global_currency == crate::ledger::GlobalCurrencyState::default()
         {
             return Ok(StateRoot::ZERO);
         }
 
-        let state = canonical_bytes(&(&self.accounts, &self.novus, &self.tax_vault, &self.exchange_vault, &self.chip_war))?;
+        let state = canonical_bytes(&(
+            &self.accounts,
+            &self.novus,
+            &self.tax_vault,
+            &self.exchange_vault,
+            &self.chip_war,
+            &self.global_currency,
+        ))?;
 
         Ok(StateRoot(
             domain(HashDomain::ProtocolState, &state).into_bytes(),
@@ -350,7 +388,7 @@ mod p3e_block_atomicity_tests {
     use crate::{
         blockchain::{Block, Emission},
         consensus::{
-            ConsensusError, expected_emission_for_height, expected_next_difficulty,
+            ConsensusError, expected_next_difficulty, reward_for_previous_hash,
             validate_candidate_for_apply,
         },
         genesis,
@@ -361,8 +399,8 @@ mod p3e_block_atomicity_tests {
     fn full_subsidy_is_mined() {
         let mut ledger = genesis::genesis_ledger().expect("genesis ledger");
         let miner = crypto::Address::new([0x31; crypto::ADDRESS_SIZE]);
+        let subsidy = reward_for_previous_hash(ledger.tip_hash().expect("genesis tip").0);
         commit_empty_block(&mut ledger, miner);
-        let subsidy = crate::consensus::expected_emission_for_height(Height(1));
         assert_eq!(ledger.state.novus.total_mined, subsidy);
         assert_eq!(ledger.state.accounts.balance(miner), subsidy);
     }
@@ -395,7 +433,7 @@ mod p3e_block_atomicity_tests {
 
         let target_bits = expected_next_difficulty(&ledger.chain).expect("next target bits");
 
-        let subsidy = expected_emission_for_height(height);
+        let subsidy = reward_for_previous_hash(previous.0);
 
         Block::from_protocol_transactions(
             height,
@@ -440,10 +478,7 @@ mod p3e_block_atomicity_tests {
             target_bits,
             60,
             Nonce(0),
-            Some(Emission::new(
-                miner,
-                expected_emission_for_height(Height(1)),
-            )),
+            Some(Emission::new(miner, reward_for_previous_hash(previous.0))),
             vec![],
         )
         .expect("height-one candidate")

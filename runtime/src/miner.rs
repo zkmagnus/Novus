@@ -1,8 +1,7 @@
 use novus::{
     blockchain::Block,
     common::Nonce,
-    consensus::{ConsensusError, PoWTarget, calculate_work_with_memory},
-    crypto::PoWMemory,
+    consensus::{ConsensusError, PoWTarget, calculate_work},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -11,11 +10,7 @@ pub struct MiningRange {
     pub attempts: u64,
 }
 
-pub fn mine_range(
-    block: &mut Block,
-    range: MiningRange,
-    memory: &mut PoWMemory,
-) -> Result<Option<Nonce>, ConsensusError> {
+pub fn mine_range(block: &mut Block, range: MiningRange) -> Result<Option<Nonce>, ConsensusError> {
     let target =
         PoWTarget::from_compact(block.target_bits()).ok_or(ConsensusError::InvalidDifficulty)?;
 
@@ -24,7 +19,7 @@ pub fn mine_range(
 
         block.header.nonce = nonce;
 
-        let hash = calculate_work_with_memory(&block.header, memory)?;
+        let hash = calculate_work(&block.header)?;
 
         if target.meets(&hash) {
             return Ok(Some(nonce));

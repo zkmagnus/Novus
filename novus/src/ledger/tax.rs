@@ -1,10 +1,10 @@
-//! Protocol taxes and race-native transaction fees held until an eligible miner finds a block.
+//! Asset-denominated protocol taxes and fees held until an eligible miner finds a block.
 
 use std::collections::BTreeMap;
 
 use borsh::{BorshDeserialize, BorshSerialize};
 
-use crate::transaction::{Currency, Amount, Race};
+use crate::transaction::{Amount, Currency, Race};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct TaxVault {
@@ -18,7 +18,10 @@ pub struct TaxVaultRollback {
 
 impl TaxVault {
     pub fn balance(&self, currency: Currency) -> Amount {
-        self.balances.get(&currency).copied().unwrap_or(Amount::ZERO)
+        self.balances
+            .get(&currency)
+            .copied()
+            .unwrap_or(Amount::ZERO)
     }
 
     pub fn balances(&self) -> &BTreeMap<Currency, Amount> {
@@ -35,7 +38,9 @@ impl TaxVault {
             if amount.is_zero() {
                 continue;
             }
-            before.entry(currency).or_insert_with(|| self.balances.get(&currency).copied());
+            before
+                .entry(currency)
+                .or_insert_with(|| self.balances.get(&currency).copied());
             let total = staged.balance(currency).checked_add(amount)?;
             staged.balances.insert(currency, total);
         }
@@ -49,11 +54,14 @@ impl TaxVault {
         &mut self,
         race: Race,
     ) -> (BTreeMap<Currency, Amount>, TaxVaultRollback) {
-        let claimable = self.balances.iter()
+        let claimable = self
+            .balances
+            .iter()
             .filter(|(currency, _)| currency.required_race().is_none_or(|owner| owner == race))
             .map(|(&currency, &amount)| (currency, amount))
             .collect::<BTreeMap<_, _>>();
-        let before = claimable.keys()
+        let before = claimable
+            .keys()
             .map(|&currency| (currency, self.balances.get(&currency).copied()))
             .collect();
         for currency in claimable.keys() {
@@ -65,8 +73,12 @@ impl TaxVault {
     pub(crate) fn rollback(&mut self, journal: TaxVaultRollback) {
         for (currency, previous) in journal.before {
             match previous {
-                Some(amount) => { self.balances.insert(currency, amount); }
-                None => { self.balances.remove(&currency); }
+                Some(amount) => {
+                    self.balances.insert(currency, amount);
+                }
+                None => {
+                    self.balances.remove(&currency);
+                }
             }
         }
     }

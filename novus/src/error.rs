@@ -99,15 +99,18 @@ pub use consensus_errors::*;
 mod consensus_errors {
     use std::{error::Error as StdError, fmt};
 
-    use crate::{blockchain::BlockError, consensus::EmissionError};
+    use crate::{
+        blockchain::BlockError,
+        consensus::{EmissionError, TimestampError},
+    };
 
     #[derive(Debug)]
     pub enum ConsensusError {
         InvalidBlock(BlockError),
         InvalidEmission(EmissionError),
         InvalidDifficulty,
+        InvalidTimestamp(TimestampError),
         UnexpectedDifficulty,
-        InvalidPoWParameters,
         PoWHashFailed,
         InvalidHeight,
         InvalidPreviousHash,
@@ -123,10 +126,10 @@ mod consensus_errors {
                 Self::InvalidBlock(error) => write!(f, "invalid block: {error}"),
                 Self::InvalidEmission(error) => write!(f, "invalid emission: {error}"),
                 Self::InvalidDifficulty => f.write_str("difficulty is outside allowed range"),
+                Self::InvalidTimestamp(error) => write!(f, "invalid block timestamp: {error}"),
                 Self::UnexpectedDifficulty => {
                     f.write_str("block difficulty does not match expected difficulty")
                 }
-                Self::InvalidPoWParameters => f.write_str("proof-of-work parameters are invalid"),
                 Self::PoWHashFailed => f.write_str("proof-of-work hash failed"),
                 Self::InvalidHeight => f.write_str("block height does not extend tip"),
                 Self::InvalidPreviousHash => f.write_str("block previous hash does not match tip"),
@@ -149,6 +152,7 @@ mod consensus_errors {
             match self {
                 Self::InvalidBlock(error) => Some(error),
                 Self::InvalidEmission(error) => Some(error),
+                Self::InvalidTimestamp(error) => Some(error),
                 _ => None,
             }
         }
@@ -210,6 +214,7 @@ mod transaction_errors {
     pub enum IntentError {
         EmptyOutputs,
         ZeroAmount,
+        MixedTransferCurrencies,
         InvalidConversionAmount,
         InvalidMessage,
         InvalidAssetCall,
@@ -221,7 +226,12 @@ mod transaction_errors {
             match self {
                 Self::EmptyOutputs => formatter.write_str("intent has no outputs"),
                 Self::ZeroAmount => formatter.write_str("intent contains a zero amount"),
-                Self::InvalidConversionAmount => formatter.write_str("conversion quote must be nonzero"),
+                Self::MixedTransferCurrencies => {
+                    formatter.write_str("one transaction cannot transfer multiple currencies")
+                }
+                Self::InvalidConversionAmount => {
+                    formatter.write_str("conversion quote must be nonzero")
+                }
                 Self::InvalidMessage => formatter.write_str(
                     "spend message must be 1-256 UTF-8 bytes without control characters",
                 ),

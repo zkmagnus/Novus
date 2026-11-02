@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use borsh::{BorshDeserialize, BorshSerialize};
 use novus::{
     blockchain::Block,
     common::Height,
@@ -7,7 +8,6 @@ use novus::{
     genesis::{EXPECTED_GENESIS_HASH, chain_spec_hash},
     ledger::Ledger,
 };
-use borsh::{BorshDeserialize, BorshSerialize};
 
 pub const SNAPSHOT_INTERVAL: u64 = 1_000;
 

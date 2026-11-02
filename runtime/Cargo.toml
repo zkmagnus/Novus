@@ -27,3 +27,6 @@ getrandom.workspace = true
 redb.workspace = true
 novus.workspace = true
 wallet = { path = "../wallet", default-features = false }
+
+[dev-dependencies]
+novus = { path = "../novus", default-features = false, features = ["test-utils"] }
