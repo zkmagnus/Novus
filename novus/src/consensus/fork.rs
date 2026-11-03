@@ -310,12 +310,11 @@ impl ForkChoice {
             block.height().0,
             parent_node.block.target_bits(),
             |height| {
-                Ok::<u64, ForkChoiceError>(
-                    self.ancestor_at_height(parent, Height(height))
-                        .ok_or(ForkChoiceError::MissingParent)?
-                        .block
-                        .timestamp(),
-                )
+                let block = &self
+                    .ancestor_at_height(parent, Height(height))
+                    .ok_or(ForkChoiceError::MissingParent)?
+                    .block;
+                Ok::<(u64, u32), ForkChoiceError>((block.timestamp(), block.target_bits()))
             },
         )?
         .ok_or(ForkChoiceError::InvalidDifficulty)

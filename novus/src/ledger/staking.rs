@@ -3,12 +3,25 @@
 //! Stake is delegated to a race-wide pool and boosts every miner in that race.
 //! This state is not connected to finality voting.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use crypto::Address;
 
 use crate::transaction::{Amount, Race};
+
+/// A participating wallet earns one cumulative point per completed Chip War epoch.
+pub const WAR_CONTRIBUTION_POINTS_PER_EPOCH: u8 = 1;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct WarRankRecord {
+    /// Most recent settled epoch in which this wallet participated.
+    pub epoch: u64,
+    /// Lifetime contribution total; points are cumulative and are never reset.
+    pub contribution_points: u64,
+    /// Zero-based rank index, from 0 through 7.
+    pub rank_index: u8,
+}
 
 /// A pending change to a race delegation pool.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
@@ -40,6 +53,14 @@ pub struct StakeState {
     locked: BTreeMap<(Race, Address), Amount>,
     /// Unbonded stake ready to be returned by a signed withdraw action.
     withdrawable: BTreeMap<(Race, Address), Amount>,
+    /// Wallets that participated through active stake or node heartbeat this epoch.
+    epoch_participants: BTreeSet<(Race, Address)>,
+    /// Wallets that already submitted a node heartbeat this epoch.
+    epoch_heartbeats: BTreeSet<(Race, Address)>,
+    /// Cumulative contribution points for each wallet.
+    contribution_points: BTreeMap<(Race, Address), u64>,
+    /// Latest rank record for each wallet. Rank persists after participation stops.
+    latest_war_ranks: BTreeMap<(Race, Address), WarRankRecord>,
     current_epoch: u64,
 }
 
@@ -50,6 +71,10 @@ impl StakeState {
             && self.pending.is_empty()
             && self.locked.is_empty()
             && self.withdrawable.is_empty()
+            && self.epoch_participants.is_empty()
+            && self.epoch_heartbeats.is_empty()
+            && self.contribution_points.is_empty()
+            && self.latest_war_ranks.is_empty()
             && self.current_epoch == 0
     }
 
@@ -78,6 +103,107 @@ impl StakeState {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// Number of unique active staking wallets participating in this race's war.
+    pub fn active_participants_for_race(&self, race: Race) -> usize {
+        self.active.get(&race).map_or(0, BTreeMap::len)
+    }
+
+    /// Unique wallets already marked as war participants in the current epoch.
+    pub fn epoch_participants_for_race(&self, race: Race) -> usize {
+        self.epoch_participants
+            .iter()
+            .filter(|&&(participant_race, _)| participant_race == race)
+            .count()
+    }
+
+    /// Lifetime contribution total, including only fully settled war epochs.
+    pub fn contribution_points(&self, race: Race, delegator: Address) -> u64 {
+        self.contribution_points
+            .get(&(race, delegator))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Whether this wallet has earned participation credit in the current epoch so far.
+    pub fn participated_this_epoch(&self, race: Race, delegator: Address) -> bool {
+        self.epoch_participants.contains(&(race, delegator))
+    }
+
+    /// Whether the wallet has already sent its one node heartbeat this epoch.
+    pub fn has_war_heartbeat(&self, race: Race, delegator: Address) -> bool {
+        self.epoch_heartbeats.contains(&(race, delegator))
+    }
+
+    /// Latest rank record. Its epoch is the most recent contribution epoch; rank persists.
+    pub fn latest_war_rank(&self, race: Race, delegator: Address) -> Option<WarRankRecord> {
+        self.latest_war_ranks.get(&(race, delegator)).copied()
+    }
+
+    /// Race-specific UI label for a zero-based rank index.
+    pub fn rank_label(race: Race, rank_index: u8) -> Option<&'static str> {
+        const BELLATO: [&str; 8] = [
+            "Singles", "Doubles", "Minor", "Major", "Carters", "Royal", "Sink", "Maximus",
+        ];
+        const CORA: [&str; 8] = [
+            "1 Knot", "2 Knot", "3 Knot", "4 Knot", "5 Knot", "6 Knot", "7 Knot", "8 Knot",
+        ];
+        const ACCRETIA: [&str; 8] = [
+            "Hastati", "Principe", "Triarii", "Centurio", "Manipel", "Phalanx", "Cohort", "Legion",
+        ];
+        let labels = match race {
+            Race::Bellato => &BELLATO,
+            Race::Cora => &CORA,
+            Race::Accretia => &ACCRETIA,
+        };
+        labels.get(usize::from(rank_index)).copied()
+    }
+
+    /// Records one epoch participation for every active staker.
+    pub(crate) fn record_war_block(&mut self) -> Option<()> {
+        for (&race, participants) in &self.active {
+            for &delegator in participants.keys() {
+                self.epoch_participants.insert((race, delegator));
+            }
+        }
+        Some(())
+    }
+
+    /// Marks one signed node heartbeat as participation in this epoch.
+    pub(crate) fn record_war_heartbeat(&mut self, race: Race, delegator: Address) -> Option<()> {
+        if Race::from(delegator.race()) != race || self.has_war_heartbeat(race, delegator) {
+            return None;
+        }
+        self.epoch_heartbeats.insert((race, delegator));
+        self.epoch_participants.insert((race, delegator));
+        Some(())
+    }
+
+    /// Settles one cumulative point for each unique participant in the completed epoch.
+    pub(crate) fn settle_contribution_epoch(&mut self, epoch: u64) -> Option<()> {
+        for &(race, delegator) in &self.epoch_participants {
+            let key = (race, delegator);
+            let total = self.contribution_points(race, delegator).checked_add(1)?;
+            self.contribution_points.insert(key, total);
+            // Rank 0: 1-8 points; each later rank spans 9 points; rank 7 starts at 63.
+            let rank_index = if total <= 8 {
+                0
+            } else {
+                1 + ((total - 9) / 9).min(6) as u8
+            };
+            self.latest_war_ranks.insert(
+                key,
+                WarRankRecord {
+                    epoch,
+                    contribution_points: total,
+                    rank_index,
+                },
+            );
+        }
+        self.epoch_participants.clear();
+        self.epoch_heartbeats.clear();
+        Some(())
     }
 
     /// Active amount a delegator assigned to a race pool.
@@ -128,7 +254,9 @@ impl StakeState {
         delegator: Address,
         amount: Amount,
     ) -> Option<()> {
-        if amount.is_zero() || Race::from(delegator.race()) != race {
+        if amount.as_atomic() < crate::consensus::MIN_WAR_STAKE_ATOMIC
+            || Race::from(delegator.race()) != race
+        {
             return None;
         }
         let pending_for_race = self
@@ -168,6 +296,9 @@ impl StakeState {
         }
         let active = self.active_delegation(race, delegator);
         let remaining = active.checked_sub(amount)?;
+        if !remaining.is_zero() && remaining.as_atomic() < crate::consensus::MIN_WAR_STAKE_ATOMIC {
+            return None;
+        }
         let effective_epoch = self.current_epoch.checked_add(1)?;
         let pool = self.active.get_mut(&race)?;
         if remaining.is_zero() {

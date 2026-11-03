@@ -355,6 +355,17 @@ impl LedgerState {
                         .ok_or(crate::ledger::AccountError::InsufficientBalance)?;
                     self.accounts.credit_currency(sender, currency, amount)?;
                 }
+                StakeAction::WarHeartbeat => {
+                    self.accounts.debit_currency(
+                        sender,
+                        currency,
+                        Amount::ZERO,
+                        transaction.intent.nonce,
+                    )?;
+                    self.staking
+                        .record_war_heartbeat(race, sender)
+                        .ok_or(crate::ledger::AccountError::InsufficientBalance)?;
+                }
             }
             Ok::<(), crate::ledger::AccountError>(())
         })();
@@ -383,10 +394,26 @@ impl LedgerState {
         miner_race: crate::transaction::Race,
     ) -> Result<StateRollbackJournal, StateError> {
         let previous_staking = self.staking.clone();
-        let journal = self
-            .chip_war
-            .record_block(height, miner_race)
+        self.staking
+            .record_war_block()
             .ok_or(StateError::AmountOverflow)?;
+        let journal = match self.chip_war.record_block(height, miner_race) {
+            Some(journal) => journal,
+            None => {
+                self.staking = previous_staking;
+                return Err(StateError::AmountOverflow);
+            }
+        };
+        if self.chip_war.completed_epochs > previous_staking.current_epoch()
+            && self
+                .staking
+                .settle_contribution_epoch(previous_staking.current_epoch())
+                .is_none()
+        {
+            self.chip_war.rollback(journal);
+            self.staking = previous_staking;
+            return Err(StateError::AmountOverflow);
+        }
         if self
             .staking
             .advance_epoch(self.chip_war.completed_epochs)

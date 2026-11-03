@@ -16,6 +16,9 @@ pub use account::{Account, AccountError, AccountRollback, AccountState};
 pub use chip_war::*;
 pub use exchange::*;
 pub use ledger::*;
-pub use staking::{PendingStakeChange, StakeChangeKind, StakeState};
+pub use staking::{
+    PendingStakeChange, StakeChangeKind, StakeState, WAR_CONTRIBUTION_POINTS_PER_EPOCH,
+    WarRankRecord,
+};
 pub use state::*;
 pub use tax::*;

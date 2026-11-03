@@ -171,7 +171,7 @@ pub(super) fn convert_currency(args: &[String]) -> Result<(), String> {
 pub(super) fn stake(args: &[String]) -> Result<(), String> {
     let operation = args
         .first()
-        .ok_or("usage: wallet stake <delegate|undelegate|withdraw> ...")?;
+        .ok_or("usage: wallet stake <delegate|undelegate|withdraw|heartbeat> ...")?;
     let action = match operation.as_str() {
         "delegate" | "undelegate" => {
             let amount = parse_amount(option(args, "--amount").ok_or("missing --amount")?)?;
@@ -184,7 +184,10 @@ pub(super) fn stake(args: &[String]) -> Result<(), String> {
         "withdraw" => StakeAction::Withdraw {
             amount: parse_amount(option(args, "--amount").ok_or("missing --amount")?)?,
         },
-        _ => return Err("stake action must be delegate, undelegate, or withdraw".into()),
+        "heartbeat" => StakeAction::WarHeartbeat,
+        _ => {
+            return Err("stake action must be delegate, undelegate, withdraw, or heartbeat".into());
+        }
     };
 
     let path = option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH);
@@ -305,6 +308,9 @@ fn submit_or_print_transaction(args: &[String], transaction: &Transaction) -> Re
             StakeAction::Withdraw { amount } => {
                 println!("Stake action: withdraw {} atomic units", amount.as_atomic())
             }
+            StakeAction::WarHeartbeat => println!(
+                "War heartbeat: register this wallet as a node participant for the current epoch"
+            ),
         }
     }
     let tax_currency = transaction

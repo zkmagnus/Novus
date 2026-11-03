@@ -36,7 +36,7 @@ pub const EXPECTED_GENESIS_HASH: BlockHash = BlockHash([
 // -----------------------------------------------------------------------------
 
 /// Development baseline for the chain specification structure.
-pub const CHAIN_SPEC_VERSION: u32 = 11;
+pub const CHAIN_SPEC_VERSION: u32 = 1;
 
 #[derive(BorshSerialize)]
 struct ChainSpecIdentity<'a> {
@@ -56,6 +56,7 @@ struct ChainSpecIdentity<'a> {
     target_block_time_seconds: u64,
     difficulty_target_timespan_seconds: u64,
     difficulty_timespan_clamp_factor: u64,
+    max_difficulty_multiplier: u32,
     median_time_past_window: u8,
     max_future_timestamp_drift_seconds: u64,
     timestamp_policy: &'a str,
@@ -132,6 +133,7 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
         difficulty_target_timespan_seconds: DIFFICULTY_TARGET_TIMESPAN_SECONDS,
 
         difficulty_timespan_clamp_factor: DIFFICULTY_TIMESPAN_CLAMP_FACTOR,
+        max_difficulty_multiplier: crate::consensus::MAX_DIFFICULTY_MULTIPLIER,
         median_time_past_window: crate::consensus::MEDIAN_TIME_PAST_WINDOW as u8,
         max_future_timestamp_drift_seconds: crate::consensus::MAX_FUTURE_TIMESTAMP_DRIFT_SECONDS,
         timestamp_policy: "median-time-past-11-consensus-max-future-2h-admission-v1",
@@ -181,8 +183,8 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
 
         hash_size: HASH_SIZE as u32,
 
-        transaction_format: "account-nonce-single-currency-transfer-five-currencies-amount-atomic-decimals-6-explicit-signed-tax-novus-transfer-fee-only-one-way-conversion-race-pool-stake-delegate-undelegate-withdraw-v9",
-        stake_epoch_policy: "delegate-activates-after-one-completed-chip-war-epoch;undelegate-withdrawable-after-one-completed-chip-war-epoch;chip-war-epoch-3-days-v1",
+        transaction_format: "account-nonce-single-currency-transfer-five-currencies-amount-atomic-decimals-6-explicit-signed-tax-novus-transfer-fee-only-one-way-conversion-race-pool-stake-delegate-undelegate-withdraw-war-heartbeat-v10",
+        stake_epoch_policy: "delegate-minimum-1000-race-coins-per-wallet-no-maximum;delegate-activates-after-one-completed-chip-war-epoch;undelegate-withdrawable-after-one-completed-chip-war-epoch;chip-war-epoch-3-days-v2;one-cumulative-contribution-point-per-participating-wallet-per-epoch;active-stake-or-one-signed-node-heartbeat-per-epoch;race-specific-cumulative-eight-tier-rank-v2",
         stake_reference_atomic: crate::consensus::STAKE_REFERENCE_ATOMIC,
         stake_boost_scale: crate::consensus::STAKE_BOOST_SCALE,
         stake_max_boost_ppm: crate::consensus::STAKE_MAX_BOOST_PPM,

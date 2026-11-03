@@ -187,6 +187,17 @@ pub(super) fn address_transaction_activity(
         if transaction.intent.sender != address {
             return Ok(None);
         }
+        if action == novus::transaction::StakeAction::WarHeartbeat {
+            return Ok(Some(serde_json::json!({
+                "height": block.height().0,
+                "block_hash": hex::encode(block.hash().map_err(|error| error.to_string())?.0),
+                "hash": hex::encode(transaction.id().map_err(|error| error.to_string())?),
+                "type": "war_heartbeat",
+                "direction": "participate",
+                "amount": 0,
+                "size_bytes": canonical_bytes(transaction).map_err(|error| error.to_string())?.len(),
+            })));
+        }
         let (kind, direction, amount) = match action {
             novus::transaction::StakeAction::Delegate { amount } => {
                 ("stake_delegate", "delegate", amount)
@@ -197,6 +208,7 @@ pub(super) fn address_transaction_activity(
             novus::transaction::StakeAction::Withdraw { amount } => {
                 ("stake_withdraw", "withdraw", amount)
             }
+            novus::transaction::StakeAction::WarHeartbeat => unreachable!("handled above"),
         };
         return Ok(Some(serde_json::json!({
             "height": block.height().0,
@@ -394,6 +406,9 @@ pub(super) fn spend_transaction_response(
             "action": "withdraw",
             "amount": amount.as_atomic(),
         }),
+        novus::transaction::StakeAction::WarHeartbeat => serde_json::json!({
+            "action": "war_heartbeat",
+        }),
     });
     serde_json::json!({
         "type": transaction_kind(transaction),
@@ -434,6 +449,7 @@ pub(super) fn transaction_kind(transaction: &Transaction) -> &'static str {
             novus::transaction::StakeAction::Delegate { .. } => "stake_delegate",
             novus::transaction::StakeAction::Undelegate { .. } => "stake_undelegate",
             novus::transaction::StakeAction::Withdraw { .. } => "stake_withdraw",
+            novus::transaction::StakeAction::WarHeartbeat => "war_heartbeat",
         }
     } else if transaction.intent.conversion.is_some() {
         "conversion"

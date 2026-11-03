@@ -15,7 +15,7 @@
         "summary": "Get node and chain status",
         "responses": {
           "200": {
-            "description": "Node status, chain height, supply, and race block rewards",
+            "description": "Node status, chain height, supply, race block rewards, tax vault balances, and Chip War epoch state",
             "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } }
           }
         }
@@ -24,10 +24,10 @@
     "/fee-policy": {
       "get": {
         "operationId": "getFeePolicy",
-        "summary": "Get Novus transfer fee, transfer tax, exchange, and block reward policy",
+        "summary": "Get transaction fees, tax, exchange, reward, stake, and difficulty policies",
         "responses": {
           "200": {
-            "description": "Only Novus transfers pay a size-based fee in Novus to the including block miner. All other transactions have no relay fee. Chip War tax adjustments for the sender's race apply to every taxable transaction type. The base tax rate is 1% for every taxable transfer and conversion. Loss and failure both add 1 point to a shared cumulative modifier, capped at +6 (7% total tax). A win subtracts 1 point down to a zero modifier, so tax never falls below the 1% base rate. Taxes use the source currency and are held in the originating race's vault, including Gold taxes; only miners of that race can claim them. Gold transfers are restricted to accounts of the sender's race. Novus transfers are global and tax-exempt. Gold converts one way at 1,000 Gold to 1 Novus; reverse conversion is unavailable.",
+            "description": "Only Novus transfers pay a size-based fee in Novus to the including block miner. All other transactions have no relay fee. Difficulty uses LWMA over 120 blocks and retargets every block, with a maximum solve-time sample of six target intervals and a 16x starting-difficulty cap. Chip War tax adjustments for the sender's race apply to every taxable transaction type. The base tax rate is 1% for every taxable transfer and conversion. Loss and failure both add 1 point to a shared cumulative modifier, capped at +6 (7% total tax). A win subtracts 1 point down to a zero modifier, so tax never falls below the 1% base rate. Taxes use the source currency and are held in the originating race's vault, including Gold taxes; only miners of that race can claim them. Gold transfers are restricted to accounts of the sender's race. Novus transfers are global and tax-exempt. Gold converts one way at 1,000 Gold to 1 Novus; reverse conversion is unavailable.",
             "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } }
           }
         }
@@ -37,7 +37,7 @@
       "post": {
         "operationId": "submitTransaction",
         "summary": "Submit a signed canonical Borsh transaction",
-        "description": "Transactions sign an explicit tax amount in the source currency. The node recalculates the tax from current consensus rules and rejects stale or incorrect values. The wallet command `wallet send` builds, signs, and submits transactions here. To submit a transaction created offline, decode its hex to bytes and POST those bytes with Content-Type application/octet-stream.",
+        "description": "Transactions sign an explicit tax amount in the source currency. The node recalculates the tax from current consensus rules and rejects stale or incorrect values. Wallet commands build, sign, and submit transactions here, including `wallet stake heartbeat` for one node-participation attestation per epoch. To submit a transaction created offline, decode its hex to bytes and POST those bytes with Content-Type application/octet-stream.",
         "requestBody": {
           "required": true,
           "content": {
@@ -120,11 +120,53 @@
     "/stake/{address}": {
       "get": {
         "operationId": "getStakePositions",
-        "summary": "Get race-native mining stake for an account",
+        "summary": "Get stake, war contribution, and rank for an account",
         "parameters": [{ "$ref": "#/components/parameters/Address" }],
         "responses": {
-          "200": { "description": "Race pool stake epoch, delegator active stake, total active race pool stake, locked amount, and withdrawable amount", "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } } },
+          "200": { "description": "Wallet stake status, current-epoch participation, cumulative non-transferable contribution points, and persistent race-specific rank. Stakers participate through active stake; a wallet-operated node can submit one signed heartbeat per epoch without finding a block.", "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } } },
           "400": { "description": "Invalid address" }
+        }
+      }
+    },
+    "/tax-vault": {
+      "get": {
+        "operationId": "getAllTaxVaultBalances",
+        "summary": "Get protocol tax balances for all race vaults",
+        "description": "Shows unclaimed tax balances grouped by the race that originated the tax and by currency. Amounts are atomic units. Only miners from the originating race can claim that race's vault.",
+        "responses": {
+          "200": { "description": "All race tax vault balances and totals by currency", "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } } }
+        }
+      }
+    },
+    "/tax-vault/{race}": {
+      "get": {
+        "operationId": "getRaceTaxVaultBalances",
+        "summary": "Get unclaimed tax balances for one race",
+        "parameters": [{ "$ref": "#/components/parameters/Race" }],
+        "responses": {
+          "200": { "description": "The selected race's unclaimed tax balances by currency", "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } } },
+          "400": { "description": "Invalid race" }
+        }
+      }
+    },
+    "/war": {
+      "get": {
+        "operationId": "getChipWarStatus",
+        "summary": "Get current Chip War epoch and race participation",
+        "description": "Returns active staker counts and current-epoch participant counts for every race, epoch block counts, tax and exchange modifiers, and the race-specific rank labels. Each unique wallet that stakes during an epoch or submits a signed node heartbeat earns one cumulative contribution point at settlement.",
+        "responses": {
+          "200": { "description": "Current war status for all races", "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } } }
+        }
+      }
+    },
+    "/war/{race}": {
+      "get": {
+        "operationId": "getRaceWarStatus",
+        "summary": "Get Chip War status for one race",
+        "parameters": [{ "$ref": "#/components/parameters/Race" }],
+        "responses": {
+          "200": { "description": "Current war status and participant count for the selected race", "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } } },
+          "400": { "description": "Invalid race" }
         }
       }
     },
@@ -173,7 +215,8 @@
   },
   "components": {
     "parameters": {
-      "Address": { "name": "address", "in": "path", "required": true, "description": "Novus race-prefixed account address", "schema": { "type": "string", "minLength": 1 } }
+      "Address": { "name": "address", "in": "path", "required": true, "description": "Novus race-prefixed account address", "schema": { "type": "string", "minLength": 1 } },
+      "Race": { "name": "race", "in": "path", "required": true, "description": "Race identifier", "schema": { "type": "string", "enum": ["accretia", "bellato", "cora"] } }
     },
     "schemas": {
       "BalanceResponse": {

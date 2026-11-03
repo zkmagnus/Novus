@@ -154,12 +154,10 @@ fn expected_difficulty(chain: &Chain, height: Height) -> Result<u32, ConsensusEr
         .ok_or(ConsensusError::InvalidPreviousHash)?;
 
     expected_difficulty_for_height(height.0, parent.target_bits(), |height| {
-        Ok::<u64, ConsensusError>(
-            chain
-                .block(&Height(height))
-                .ok_or(ConsensusError::InvalidPreviousHash)?
-                .timestamp(),
-        )
+        let block = chain
+            .block(&Height(height))
+            .ok_or(ConsensusError::InvalidPreviousHash)?;
+        Ok::<(u64, u32), ConsensusError>((block.timestamp(), block.target_bits()))
     })?
     .ok_or(ConsensusError::InvalidDifficulty)
 }

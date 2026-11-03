@@ -1,17 +1,24 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{error::Error as StdError, fmt};
 
-use crate::{blockchain::Block, consensus::PoWTarget, transaction::Amount};
+use crate::{
+    blockchain::Block,
+    consensus::{PoWTarget, Work, block_work},
+    transaction::Amount,
+};
 use crypto::{Address, Hash, HashDomain, canonical_bytes, domain, hash_bytes};
 
 pub const TARGET_BLOCK_TIME_SECONDS: u64 = 30;
 pub const FINALITY_DEPTH_BLOCKS: u64 = 10_080;
-/// Difficulty retargets at the first block after each completed Chip War epoch.
-pub const DIFFICULTY_ADJUSTMENT_WINDOW: u64 = crate::ledger::CHIP_WAR_EPOCH_BLOCKS;
+/// Number of solved blocks used by the linear weighted moving average.
+pub const DIFFICULTY_ADJUSTMENT_WINDOW: u64 = 120;
 pub const DIFFICULTY_TARGET_TIMESPAN_SECONDS: u64 =
     TARGET_BLOCK_TIME_SECONDS * DIFFICULTY_ADJUSTMENT_WINDOW;
-pub const DIFFICULTY_TIMESPAN_CLAMP_FACTOR: u64 = 2;
-pub const DIFFICULTY_ALGORITHM: &str = "chip-war-epoch-bitcoin-style-target-bits-retarget";
+/// Maximum solve time admitted for one LWMA sample, in target-block intervals.
+pub const DIFFICULTY_TIMESPAN_CLAMP_FACTOR: u64 = 6;
+/// Network difficulty cannot exceed 16 times the starting difficulty.
+pub const MAX_DIFFICULTY_MULTIPLIER: u32 = 16;
+pub const DIFFICULTY_ALGORITHM: &str = "lwma-120-blocks-retarget-every-block-capped-at-16x-start";
 pub const MEDIAN_TIME_PAST_WINDOW: usize = 11;
 pub const MAX_FUTURE_TIMESTAMP_DRIFT_SECONDS: u64 = 2 * 60 * 60;
 
@@ -62,75 +69,92 @@ pub fn validate_timestamp(
     Ok(())
 }
 
-pub const fn is_difficulty_adjustment_boundary(next_height: u64) -> bool {
-    next_height > 1 && (next_height - 1).is_multiple_of(DIFFICULTY_ADJUSTMENT_WINDOW)
+/// Lowest allowed target, corresponding to at most 16 times starting difficulty.
+pub fn minimum_difficulty_target_bits() -> Option<u32> {
+    let start = PoWTarget::from_compact(crate::consensus::TARGET_BITS_START)?;
+    let floor = start.scale_ratio(1, MAX_DIFFICULTY_MULTIPLIER)?;
+    Some(floor.to_compact())
 }
 
-pub fn next_difficulty_from_timestamps(
-    previous_target_bits: u32,
-    first_timestamp: u64,
-    last_timestamp: u64,
-) -> Option<u32> {
-    let previous = PoWTarget::from_compact(previous_target_bits)?;
+fn work_as_u64(work: Work) -> Option<u64> {
+    let limbs = work.to_be_limbs();
+    limbs[..7].iter().all(|limb| *limb == 0).then_some(limbs[7])
+}
+
+/// Computes a linear weighted moving average target from N solved blocks and
+/// N+1 timestamps. The newest solve interval receives the largest weight.
+pub fn next_lwma_difficulty(target_bits: &[u32], timestamps: &[u64]) -> Option<u32> {
+    let window = usize::try_from(DIFFICULTY_ADJUSTMENT_WINDOW).ok()?;
+    if target_bits.len() != window || timestamps.len() != window + 1 {
+        return None;
+    }
+
+    let mut weighted_solve_time = 0_u64;
+    let mut total_work = 0_u64;
+    let max_solve_time = TARGET_BLOCK_TIME_SECONDS.checked_mul(DIFFICULTY_TIMESPAN_CLAMP_FACTOR)?;
+
+    for index in 1..=window {
+        let previous_timestamp = timestamps[index - 1];
+        let current_timestamp = timestamps[index].max(previous_timestamp.saturating_add(1));
+        let solve_time = current_timestamp
+            .saturating_sub(previous_timestamp)
+            .clamp(1, max_solve_time);
+        let weight = u64::try_from(index).ok()?;
+        weighted_solve_time = weighted_solve_time.checked_add(weight.checked_mul(solve_time)?)?;
+        total_work = total_work.checked_add(work_as_u64(block_work(target_bits[index - 1])?)?)?;
+    }
+
+    // Prevent extreme timestamp compression from causing an unbounded jump.
+    let minimum_weighted_time = u64::try_from(window)
+        .ok()?
+        .checked_mul(u64::try_from(window).ok()?)?
+        .checked_mul(TARGET_BLOCK_TIME_SECONDS)?
+        / 20;
+    weighted_solve_time = weighted_solve_time.max(minimum_weighted_time);
+
+    let expected_weighted_time = TARGET_BLOCK_TIME_SECONDS
+        .checked_mul(u64::try_from(window).ok()?)?
+        .checked_mul(u64::try_from(window + 1).ok()?)?
+        / 2;
+    let average_work = total_work / u64::try_from(window).ok()?;
+    let starting_work = work_as_u64(block_work(crate::consensus::TARGET_BITS_START)?)?;
+    let numerator = starting_work.checked_mul(weighted_solve_time)?;
+    let denominator = average_work.checked_mul(expected_weighted_time)?;
+    let numerator = u32::try_from(numerator).ok()?;
+    let denominator = u32::try_from(denominator).ok()?;
+
+    let start_target = PoWTarget::from_compact(crate::consensus::TARGET_BITS_START)?;
     let pow_limit = PoWTarget::from_compact(crate::consensus::TARGET_BITS_START)?;
-    let expected = DIFFICULTY_TARGET_TIMESPAN_SECONDS;
-    let minimum = expected / DIFFICULTY_TIMESPAN_CLAMP_FACTOR;
-    let maximum = expected.checked_mul(DIFFICULTY_TIMESPAN_CLAMP_FACTOR)?;
-    let actual = last_timestamp
-        .saturating_sub(first_timestamp)
-        .clamp(minimum, maximum);
-
-    let numerator = u32::try_from(actual).ok()?;
-    let denominator = u32::try_from(expected).ok()?;
-    let next = previous.scale_ratio(numerator, denominator)?;
-    let next = if next > pow_limit { pow_limit } else { next };
-
+    let difficulty_floor = PoWTarget::from_compact(minimum_difficulty_target_bits()?)?;
+    let next = start_target.scale_ratio(numerator, denominator)?;
+    let next = next.min(pow_limit).max(difficulty_floor);
     Some(next.to_compact())
-}
-
-pub fn expected_difficulty_from_timestamps(
-    next_height: u64,
-    parent_difficulty: u32,
-    first_timestamp: u64,
-    last_timestamp: u64,
-) -> Option<u32> {
-    if next_height == 1 {
-        return Some(crate::consensus::TARGET_BITS_START);
-    }
-
-    if !is_difficulty_adjustment_boundary(next_height) {
-        return Some(parent_difficulty);
-    }
-
-    next_difficulty_from_timestamps(parent_difficulty, first_timestamp, last_timestamp)
 }
 
 pub fn expected_difficulty_for_height<E>(
     next_height: u64,
     parent_difficulty: u32,
-    mut timestamp_at: impl FnMut(u64) -> Result<u64, E>,
+    mut sample_at: impl FnMut(u64) -> Result<(u64, u32), E>,
 ) -> Result<Option<u32>, E> {
     if next_height == 1 {
         return Ok(Some(crate::consensus::TARGET_BITS_START));
     }
 
-    if !is_difficulty_adjustment_boundary(next_height) {
+    if next_height <= DIFFICULTY_ADJUSTMENT_WINDOW {
         return Ok(Some(parent_difficulty));
     }
 
-    let first_height = next_height - DIFFICULTY_ADJUSTMENT_WINDOW;
-
-    let last_height = next_height - 1;
-
-    let first_timestamp = timestamp_at(first_height)?;
-
-    let last_timestamp = timestamp_at(last_height)?;
-
-    Ok(next_difficulty_from_timestamps(
-        parent_difficulty,
-        first_timestamp,
-        last_timestamp,
-    ))
+    let first_height = next_height - DIFFICULTY_ADJUSTMENT_WINDOW - 1;
+    let mut timestamps = Vec::with_capacity(DIFFICULTY_ADJUSTMENT_WINDOW as usize + 1);
+    let mut target_bits = Vec::with_capacity(DIFFICULTY_ADJUSTMENT_WINDOW as usize);
+    for height in first_height..next_height {
+        let (timestamp, bits) = sample_at(height)?;
+        timestamps.push(timestamp);
+        if height > first_height {
+            target_bits.push(bits);
+        }
+    }
+    Ok(next_lwma_difficulty(&target_bits, &timestamps))
 }
 
 pub const MIN_BLOCK_REWARD_COINS: u128 = 100;
@@ -169,19 +193,13 @@ pub fn reward_for_previous_hash(previous_hash: [u8; 32]) -> Amount {
 }
 
 #[cfg(test)]
-mod difficulty_epoch_tests {
+mod difficulty_lwma_tests {
     use super::*;
 
     #[test]
-    fn difficulty_retargets_at_the_start_of_each_new_chip_war_epoch() {
-        let epoch = crate::ledger::CHIP_WAR_EPOCH_BLOCKS;
-
-        assert_eq!(DIFFICULTY_ADJUSTMENT_WINDOW, epoch);
-        assert_eq!(DIFFICULTY_TARGET_TIMESPAN_SECONDS, 3 * 24 * 60 * 60);
-        assert!(!is_difficulty_adjustment_boundary(epoch));
-        assert!(is_difficulty_adjustment_boundary(epoch + 1));
-        assert!(!is_difficulty_adjustment_boundary(epoch + 2));
-        assert!(is_difficulty_adjustment_boundary(epoch * 2 + 1));
+    fn lwma_uses_a_120_block_window_and_targets_one_hour() {
+        assert_eq!(DIFFICULTY_ADJUSTMENT_WINDOW, 120);
+        assert_eq!(DIFFICULTY_TARGET_TIMESPAN_SECONDS, 60 * 60);
     }
 }
 

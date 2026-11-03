@@ -6,6 +6,10 @@
 
 use crate::{consensus::PoWTarget, transaction::Amount};
 
+/// Minimum amount for one wallet to register as a war participant.
+/// Additional stake has no protocol maximum.
+pub const MIN_WAR_STAKE_ATOMIC: u128 = 1_000 * Amount::ATOMIC_UNITS_PER_COIN;
+
 /// Reference stake for full mining boost: 100,000 whole race-native coins.
 pub const STAKE_REFERENCE_ATOMIC: u128 = 100_000 * Amount::ATOMIC_UNITS_PER_COIN;
 /// Fixed-point scale for boost and reward allocation.

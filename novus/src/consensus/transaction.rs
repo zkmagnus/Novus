@@ -43,6 +43,9 @@ pub trait TransactionStateView {
     fn withdrawable_stake(&self, _race: Race, _delegator: Address) -> Amount {
         Amount::ZERO
     }
+    fn has_war_heartbeat(&self, _race: Race, _delegator: Address) -> bool {
+        false
+    }
 }
 
 pub fn validate_transaction(
@@ -221,6 +224,9 @@ fn validate_stake_action(
     let currency = Currency::for_race_reward(intent.race);
     match action {
         StakeAction::Delegate { amount } => {
+            if amount.as_atomic() < crate::consensus::MIN_WAR_STAKE_ATOMIC {
+                return Err(TransactionConsensusError::StakeBelowMinimum);
+            }
             // Delegated amounts have already been debited from the account
             // balance; `locked_stake` tracks escrow/unbonding metadata only.
             if state
@@ -232,12 +238,16 @@ fn validate_stake_action(
             }
         }
         StakeAction::Undelegate { amount } => {
-            if state
+            let Some(remaining) = state
                 .active_stake(intent.race, intent.sender)
                 .checked_sub(amount)
-                .is_none()
-            {
+            else {
                 return Err(TransactionConsensusError::InsufficientStake);
+            };
+            if !remaining.is_zero()
+                && remaining.as_atomic() < crate::consensus::MIN_WAR_STAKE_ATOMIC
+            {
+                return Err(TransactionConsensusError::StakeBelowMinimum);
             }
         }
         StakeAction::Withdraw { amount } => {
@@ -247,6 +257,11 @@ fn validate_stake_action(
                 .is_none()
             {
                 return Err(TransactionConsensusError::StakeNotWithdrawable);
+            }
+        }
+        StakeAction::WarHeartbeat => {
+            if state.has_war_heartbeat(intent.race, intent.sender) {
+                return Err(TransactionConsensusError::DuplicateWarHeartbeat);
             }
         }
     }
@@ -430,6 +445,8 @@ pub enum TransactionConsensusError {
     WrongCurrencyRecipientRace,
     InsufficientStake,
     StakeNotWithdrawable,
+    StakeBelowMinimum,
+    DuplicateWarHeartbeat,
 }
 
 impl fmt::Display for TransactionConsensusError {
@@ -473,6 +490,11 @@ impl fmt::Display for TransactionConsensusError {
                 formatter.write_str("active delegated stake is insufficient")
             }
             Self::StakeNotWithdrawable => formatter.write_str("stake is still locked or unbonding"),
+            Self::StakeBelowMinimum => formatter
+                .write_str("war participation requires at least 1,000 race coins per wallet"),
+            Self::DuplicateWarHeartbeat => {
+                formatter.write_str("wallet already submitted a war heartbeat this epoch")
+            }
         }
     }
 }

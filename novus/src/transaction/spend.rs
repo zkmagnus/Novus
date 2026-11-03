@@ -214,9 +214,17 @@ pub struct AccountIntent {
 /// Race-native mining-pool stake action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub enum StakeAction {
-    Delegate { amount: Amount },
-    Undelegate { amount: Amount },
-    Withdraw { amount: Amount },
+    Delegate {
+        amount: Amount,
+    },
+    Undelegate {
+        amount: Amount,
+    },
+    Withdraw {
+        amount: Amount,
+    },
+    /// Signed proof that the wallet's mining node participated in this war epoch.
+    WarHeartbeat,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
@@ -253,9 +261,10 @@ impl AccountIntent {
             let amount = match action {
                 StakeAction::Delegate { amount, .. }
                 | StakeAction::Undelegate { amount, .. }
-                | StakeAction::Withdraw { amount } => amount,
+                | StakeAction::Withdraw { amount } => Some(amount),
+                StakeAction::WarHeartbeat => None,
             };
-            if amount.is_zero() {
+            if amount.is_some_and(Amount::is_zero) {
                 return Err(IntentError::ZeroAmount);
             }
             if !self.transfers.is_empty()

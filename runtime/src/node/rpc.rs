@@ -157,7 +157,20 @@ pub(super) fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> 
                 "novus_transfer_policy": "global_any_race",
                 "mixed_currency_transfers_allowed": false,
                 "next_block_emission": emission.as_atomic(),
+                "difficulty": {
+                    "target_block_time_seconds": novus::consensus::TARGET_BLOCK_TIME_SECONDS,
+                    "algorithm": novus::consensus::DIFFICULTY_ALGORITHM,
+                    "window_blocks": novus::consensus::DIFFICULTY_ADJUSTMENT_WINDOW,
+                    "adjusts_every_block": true,
+                    "target_timespan_seconds": novus::consensus::DIFFICULTY_TARGET_TIMESPAN_SECONDS,
+                    "maximum_difficulty_multiplier_from_start": novus::consensus::MAX_DIFFICULTY_MULTIPLIER,
+                    "minimum_target_bits": novus::consensus::minimum_difficulty_target_bits(),
+                    "maximum_target_bits": novus::consensus::TARGET_BITS_START,
+                    "maximum_solve_time_per_sample_multiplier": novus::consensus::DIFFICULTY_TIMESPAN_CLAMP_FACTOR,
+                },
                 "stake_pow": {
+                    "minimum_stake_atomic": novus::consensus::MIN_WAR_STAKE_ATOMIC,
+                    "maximum_stake_atomic": serde_json::Value::Null,
                     "reference_stake_atomic": novus::consensus::STAKE_REFERENCE_ATOMIC,
                     "max_boost_ppm": novus::consensus::STAKE_MAX_BOOST_PPM,
                     "max_target_multiplier": 2,
@@ -167,6 +180,15 @@ pub(super) fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> 
                     "target_snapshot": "parent_state_total_active_race_pool_stake",
                     "cumulative_work": "effective_target",
                     "stake_reward": "none",
+                },
+                "war_contribution": {
+                    "points_per_participating_epoch": novus::ledger::WAR_CONTRIBUTION_POINTS_PER_EPOCH,
+                    "points_are_cumulative": true,
+                    "maximum_points": serde_json::Value::Null,
+                    "points_are_transferable": false,
+                    "rank_tiers": 8,
+                    "rank_settlement": "at_chip_war_epoch_boundary",
+                    "node_participation": "one_signed_wallet_heartbeat_per_epoch_no_block_found_required",
                 },
                 "race_exchange_rate_units_per_gold": novus::transaction::Race::all().into_iter().map(|race| (format!("{race:?}").to_lowercase(), ledger.state().chip_war.exchange_rate(race))).collect::<std::collections::BTreeMap<_, _>>(),
                 "race_currency_to_gold": {
@@ -202,6 +224,16 @@ pub(super) fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> 
             })
         }
         "/blocks/latest" => latest_blocks_response(&ledger)?,
+        "/tax-vault" => tax_vault_response(&ledger, None)?,
+        route if route.starts_with("/tax-vault/") => {
+            let race = parse_race_slug(route.trim_start_matches("/tax-vault/"))?;
+            tax_vault_response(&ledger, Some(race))?
+        }
+        "/war" => war_response(&ledger, None)?,
+        route if route.starts_with("/war/") => {
+            let race = parse_race_slug(route.trim_start_matches("/war/"))?;
+            war_response(&ledger, Some(race))?
+        }
         route if route.starts_with("/balance/") => {
             let address = route.trim_start_matches("/balance/");
             if address.is_empty() || address.contains(['/', '?', '#']) {
@@ -226,14 +258,33 @@ pub(super) fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> 
         route if route.starts_with("/stake/") => {
             let address = parse_address(route.trim_start_matches("/stake/"))?;
             let race = novus::transaction::Race::from(address.race());
+            let stake = &ledger.state().staking;
+            let contribution_points = stake.contribution_points(race, address);
+            let last_rank = stake.latest_war_rank(race, address);
             serde_json::json!({
                 "address": novus::crypto::address_to_string(&address, address.race().prefix()),
                 "race": format!("{race:?}").to_lowercase(),
-                "epoch": ledger.state().staking.current_epoch(),
-                "locked_atomic": ledger.state().staking.locked_by(race, address).as_atomic(),
-                "withdrawable_atomic": ledger.state().staking.withdrawable_by(race, address).as_atomic(),
-                "active_stake_atomic": ledger.state().staking.active_by_delegator(race, address).as_atomic(),
-                "race_pool_active_stake_atomic": ledger.state().staking.active_for_race(race).unwrap_or_default().as_atomic(),
+                "epoch": stake.current_epoch(),
+                "locked_atomic": stake.locked_by(race, address).as_atomic(),
+                "withdrawable_atomic": stake.withdrawable_by(race, address).as_atomic(),
+                "active_stake_atomic": stake.active_by_delegator(race, address).as_atomic(),
+                "active_participant": !stake.active_by_delegator(race, address).is_zero(),
+                "minimum_stake_atomic": novus::consensus::MIN_WAR_STAKE_ATOMIC,
+                "race_active_participant_count": stake.active_participants_for_race(race),
+                "race_pool_active_stake_atomic": stake.active_for_race(race).unwrap_or_default().as_atomic(),
+                "contribution": {
+                    "epoch": stake.current_epoch(),
+                    "participated_this_epoch": stake.participated_this_epoch(race, address),
+                    "heartbeat_submitted_this_epoch": stake.has_war_heartbeat(race, address),
+                    "total_points": contribution_points,
+                    "transferable": false,
+                },
+                "latest_rank": last_rank.map(|record| serde_json::json!({
+                    "last_contribution_epoch": record.epoch,
+                    "total_contribution_points": record.contribution_points,
+                    "rank_index": record.rank_index,
+                    "label": novus::ledger::StakeState::rank_label(race, record.rank_index),
+                })),
             })
         }
         route if route.starts_with("/block/") => {
@@ -352,6 +403,105 @@ pub(super) fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> 
         _ => return Err("unknown RPC route".into()),
     };
     write_http_response(stream, 200, &response)
+}
+
+fn parse_race_slug(value: &str) -> Result<novus::transaction::Race, String> {
+    match value {
+        "accretia" => Ok(novus::transaction::Race::Accretia),
+        "bellato" => Ok(novus::transaction::Race::Bellato),
+        "cora" => Ok(novus::transaction::Race::Cora),
+        _ => Err("race must be accretia, bellato, or cora".into()),
+    }
+}
+
+fn race_slug(race: novus::transaction::Race) -> &'static str {
+    match race {
+        novus::transaction::Race::Accretia => "accretia",
+        novus::transaction::Race::Bellato => "bellato",
+        novus::transaction::Race::Cora => "cora",
+    }
+}
+
+fn tax_vault_response(
+    ledger: &Ledger,
+    requested_race: Option<novus::transaction::Race>,
+) -> Result<serde_json::Value, String> {
+    use novus::transaction::{Amount, Currency, Race};
+    let races = requested_race.map_or_else(|| Race::all().to_vec(), |race| vec![race]);
+    let mut balances = std::collections::BTreeMap::new();
+    let mut totals = Currency::all()
+        .into_iter()
+        .map(|currency| (currency, Amount::ZERO))
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    for race in races {
+        let mut by_currency = std::collections::BTreeMap::new();
+        for currency in Currency::all() {
+            let amount = ledger.state().tax_vault.balance(race, currency);
+            if !amount.is_zero() {
+                by_currency.insert(format!("{currency:?}").to_lowercase(), amount.as_atomic());
+                let total = totals
+                    .get(&currency)
+                    .copied()
+                    .unwrap_or(Amount::ZERO)
+                    .checked_add(amount)
+                    .ok_or("tax vault total overflow")?;
+                totals.insert(currency, total);
+            }
+        }
+        balances.insert(race_slug(race), serde_json::json!(by_currency));
+    }
+
+    let total_by_currency = totals
+        .into_iter()
+        .filter(|(_, amount)| !amount.is_zero())
+        .map(|(currency, amount)| (format!("{currency:?}").to_lowercase(), amount.as_atomic()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    Ok(serde_json::json!({
+        "tip_height": ledger.tip_height().map_or(0, |height| height.0),
+        "scope": requested_race.map(race_slug).unwrap_or("all"),
+        "balances_by_race": balances,
+        "total_by_currency_atomic": total_by_currency,
+        "claim_policy": "only_miners_from_the_origin_race_can_claim_that_race_vault",
+    }))
+}
+
+fn war_response(
+    ledger: &Ledger,
+    requested_race: Option<novus::transaction::Race>,
+) -> Result<serde_json::Value, String> {
+    use novus::transaction::Race;
+    let races = requested_race.map_or_else(|| Race::all().to_vec(), |race| vec![race]);
+    let war = &ledger.state().chip_war;
+    let staking = &ledger.state().staking;
+    let races = races
+        .into_iter()
+        .map(|race| {
+            let rank_labels = (0..8)
+                .map(|index| novus::ledger::StakeState::rank_label(race, index).unwrap_or(""))
+                .collect::<Vec<_>>();
+            serde_json::json!({
+                "race": race_slug(race),
+                "active_staker_count": staking.active_participants_for_race(race),
+                "current_epoch_participant_count": staking.epoch_participants_for_race(race),
+                "active_stake_atomic": staking.active_for_race(race).unwrap_or_default().as_atomic(),
+                "blocks_in_epoch": war.block_counts.get(&race).copied().unwrap_or(0),
+                "tax_modifier_percent_points": war.tax_rate(race),
+                "exchange_rate_units_per_gold": war.exchange_rate(race),
+                "last_outcome": war.last_outcomes.get(&race).map(|outcome| format!("{outcome:?}").to_lowercase()),
+                "rank_labels": rank_labels,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(serde_json::json!({
+        "tip_height": ledger.tip_height().map_or(0, |height| height.0),
+        "epoch": war.completed_epochs,
+        "epoch_seconds": novus::ledger::CHIP_WAR_EPOCH_SECONDS,
+        "epoch_blocks": novus::ledger::CHIP_WAR_EPOCH_BLOCKS,
+        "points_per_participating_epoch": novus::ledger::WAR_CONTRIBUTION_POINTS_PER_EPOCH,
+        "contribution_points_are_cumulative": true,
+        "races": races,
+    }))
 }
 
 pub(super) fn read_http_request(stream: &mut impl Read) -> Result<HttpRequest, String> {

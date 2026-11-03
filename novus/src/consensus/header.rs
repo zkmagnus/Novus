@@ -15,7 +15,12 @@ use common::Height;
 
 use crypto::BlockHash;
 
-pub const RECENT_HEADER_WINDOW: usize = (DIFFICULTY_ADJUSTMENT_WINDOW as usize) * 2;
+pub const RECENT_HEADER_WINDOW: usize =
+    if DIFFICULTY_ADJUSTMENT_WINDOW as usize + 1 > MEDIAN_TIME_PAST_WINDOW {
+        DIFFICULTY_ADJUSTMENT_WINDOW as usize + 1
+    } else {
+        MEDIAN_TIME_PAST_WINDOW
+    };
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct HeaderAtHeight {
@@ -160,16 +165,14 @@ fn expected_header_difficulty(
     let next_height = previous.height.0.saturating_add(1);
 
     expected_difficulty_for_height(next_height, previous.header.target_bits, |height| {
-        Ok::<u64, HeaderChainError>(
-            recent
-                .iter()
-                .find(|candidate| candidate.height.0 == height)
-                .ok_or(HeaderChainError::InvalidHeaderChain(
-                    ForkChoiceError::MissingParent,
-                ))?
-                .header
-                .timestamp,
-        )
+        let header = &recent
+            .iter()
+            .find(|candidate| candidate.height.0 == height)
+            .ok_or(HeaderChainError::InvalidHeaderChain(
+                ForkChoiceError::MissingParent,
+            ))?
+            .header;
+        Ok::<(u64, u32), HeaderChainError>((header.timestamp, header.target_bits))
     })?
     .ok_or(HeaderChainError::InvalidHeaderChain(
         ForkChoiceError::InvalidDifficulty,
@@ -245,16 +248,14 @@ pub fn verify_header_chain_extension(
             chain_header.height.0,
             previous.target_bits,
             |height| {
-                Ok::<u64, HeaderChainError>(
-                    recent
-                        .iter()
-                        .find(|candidate| candidate.height.0 == height)
-                        .ok_or(HeaderChainError::InvalidHeaderChain(
-                            ForkChoiceError::MissingParent,
-                        ))?
-                        .header
-                        .timestamp,
-                )
+                let header = &recent
+                    .iter()
+                    .find(|candidate| candidate.height.0 == height)
+                    .ok_or(HeaderChainError::InvalidHeaderChain(
+                        ForkChoiceError::MissingParent,
+                    ))?
+                    .header;
+                Ok::<(u64, u32), HeaderChainError>((header.timestamp, header.target_bits))
             },
         )?
         .ok_or(HeaderChainError::InvalidHeaderChain(

@@ -322,6 +322,13 @@ impl TransactionStateView for LedgerState {
     ) -> crate::transaction::Amount {
         self.staking.withdrawable_by(race, delegator)
     }
+    fn has_war_heartbeat(
+        &self,
+        race: crate::transaction::Race,
+        delegator: crypto::Address,
+    ) -> bool {
+        self.staking.has_war_heartbeat(race, delegator)
+    }
 }
 
 //

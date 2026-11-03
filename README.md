@@ -143,7 +143,7 @@ difficulty target
 
 model.
 
-Chip War epochs last 3 days (8,640 blocks at the 30-second target). Tax and exchange outcomes settle at each epoch boundary, and difficulty retargets at the start of the next epoch. Block timestamps must be after the median time of recent blocks and no more than two hours ahead of local time.
+Chip War epochs last 3 days (8,640 blocks at the 30-second target). Tax and exchange outcomes settle at each epoch boundary. Proof-of-work difficulty uses LWMA with a 120-block window (about one hour) and retargets every block after the initial window is available. Each solve-time sample is capped at six target intervals, and network difficulty has a hard ceiling of 16x its starting value; if hash power grows beyond that ceiling, blocks may arrive faster than the 30-second target. Block timestamps must be after the median time of recent blocks and no more than two hours ahead of local time.
 
 ---
 
@@ -340,6 +340,18 @@ cargo run -p accretia -- help
 ```
 
 The wallet and node default RPC address is `127.0.0.1:10593`.
+
+### Read-only RPC views
+
+The RPC exposes `/status` (including aggregate tax-vault balances), `/tax-vault`
+and `/tax-vault/{race}` (unclaimed tax by originating race and currency),
+`/war` and `/war/{race}` (epoch progress and active participant counts), and
+`/stake/{address}` (a wallet's active stake, current-epoch participation,
+cumulative contribution total, and persistent race rank). Each wallet earns at
+most one non-transferable contribution point per epoch, either by having active
+stake or by submitting `wallet stake heartbeat`; the heartbeat does not require
+finding a block. Full request and response details are served at `/docs` and
+`/openapi.json`.
 
 ---
 
