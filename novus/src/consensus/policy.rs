@@ -162,10 +162,10 @@ pub const MAX_BLOCK_REWARD_COINS: u128 = 1_000;
 pub const MIN_BLOCK_EMISSION: u128 = MIN_BLOCK_REWARD_COINS * Amount::ATOMIC_UNITS_PER_COIN;
 pub const BLOCK_EMISSION: u128 = MAX_BLOCK_REWARD_COINS * Amount::ATOMIC_UNITS_PER_COIN;
 pub const TRANSFER_TAX_PERCENT: u8 = 1;
-pub const RACE_TO_GOLD_CONVERSION_TAX_PERCENT: u8 = 1;
+pub const RACE_TO_GOLD_CONVERSION_TAX_PERCENT: u8 = 3;
 pub const GOLD_TRANSFER_TAX_PERCENT: u8 = 1;
 pub const GOLD_TO_RACE_CONVERSION_TAX_PERCENT: u8 = 1;
-pub const GOLD_TO_NOVUS_CONVERSION_TAX_PERCENT: u8 = 1;
+pub const GOLD_TO_NOVUS_CONVERSION_TAX_PERCENT: u8 = 5;
 
 /// Derives the next block subsidy deterministically from its parent block hash.
 /// This follows Dogecoin's original reward approach; miners can grind candidate
