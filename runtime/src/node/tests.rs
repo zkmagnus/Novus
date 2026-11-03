@@ -20,6 +20,7 @@ fn test_transaction(seed_byte: u8, recipient: Address) -> Transaction {
                 Amount::from_atomic(10),
             )],
             conversion: None,
+            stake_action: None,
             fee: Amount::ZERO,
             tax: Amount::ONE,
             message: None,

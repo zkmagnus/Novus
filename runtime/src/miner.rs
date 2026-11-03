@@ -14,6 +14,14 @@ pub fn mine_range(block: &mut Block, range: MiningRange) -> Result<Option<Nonce>
     let target =
         PoWTarget::from_compact(block.target_bits()).ok_or(ConsensusError::InvalidDifficulty)?;
 
+    mine_range_at_target(block, range, target)
+}
+
+pub fn mine_range_at_target(
+    block: &mut Block,
+    range: MiningRange,
+    target: PoWTarget,
+) -> Result<Option<Nonce>, ConsensusError> {
     for offset in 0..range.attempts {
         let nonce = Nonce(range.start_nonce.wrapping_add(offset));
 

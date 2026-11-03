@@ -124,13 +124,6 @@ pub(super) fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> 
         "/fee-policy" => {
             let emission = expected_next_emission(&ledger)?;
             serde_json::json!({
-                "minimum_fee_rate_atomic_units_per_byte": MIN_RELAY_FEE_ATOMIC_UNITS_PER_BYTE,
-                "fee_currency_policy": {
-                    "race_currency_transfer": "gold",
-                    "conversion": "source_currency",
-                    "gold": "gold",
-                    "novus": "novus"
-                },
                 "tax_currency_policy": {
                     "race_currency": "same_as_transferred_or_converted_currency",
                     "gold": "gold",
@@ -156,15 +149,25 @@ pub(super) fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> 
                     "maximum": novus::ledger::MAX_RACE_TAX_MODIFIER_PERCENT,
                     "effective_tax_cap": novus::ledger::MAX_EFFECTIVE_TAX_PERCENT
                 },
-                "minimum_relay_fee_currency_policy": "same_as_transaction_fee_currency",
-                "relay_fee_distribution_policy": {
-                    "novus": "credited_directly_to_miner_of_including_block_any_race",
-                    "gold": "tax_vault_claimed_by_eligible_miners"
+                "relay_fee_policy": {
+                    "novus_transfer": "size_based_fee_paid_in_novus_to_including_block_miner",
+                    "other_transactions": "none"
                 },
                 "gold_transfer_policy": "sender_race_only",
                 "novus_transfer_policy": "global_any_race",
                 "mixed_currency_transfers_allowed": false,
                 "next_block_emission": emission.as_atomic(),
+                "stake_pow": {
+                    "reference_stake_atomic": novus::consensus::STAKE_REFERENCE_ATOMIC,
+                    "max_boost_ppm": novus::consensus::STAKE_MAX_BOOST_PPM,
+                    "max_target_multiplier": 2,
+                    "activation_epochs": 1,
+                    "unbonding_epochs": 1,
+                    "epoch_seconds": novus::ledger::CHIP_WAR_EPOCH_SECONDS,
+                    "target_snapshot": "parent_state_total_active_race_pool_stake",
+                    "cumulative_work": "effective_target",
+                    "stake_reward": "none",
+                },
                 "race_exchange_rate_units_per_gold": novus::transaction::Race::all().into_iter().map(|race| (format!("{race:?}").to_lowercase(), ledger.state().chip_war.exchange_rate(race))).collect::<std::collections::BTreeMap<_, _>>(),
                 "race_currency_to_gold": {
                     "base_rate": novus::transaction::RACE_CURRENCY_PER_GOLD,
@@ -219,6 +222,19 @@ pub(super) fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> 
                     novus::transaction::Race::Cora => "cora",
                 });
             serde_json::json!({"race": race})
+        }
+        route if route.starts_with("/stake/") => {
+            let address = parse_address(route.trim_start_matches("/stake/"))?;
+            let race = novus::transaction::Race::from(address.race());
+            serde_json::json!({
+                "address": novus::crypto::address_to_string(&address, address.race().prefix()),
+                "race": format!("{race:?}").to_lowercase(),
+                "epoch": ledger.state().staking.current_epoch(),
+                "locked_atomic": ledger.state().staking.locked_by(race, address).as_atomic(),
+                "withdrawable_atomic": ledger.state().staking.withdrawable_by(race, address).as_atomic(),
+                "active_stake_atomic": ledger.state().staking.active_by_delegator(race, address).as_atomic(),
+                "race_pool_active_stake_atomic": ledger.state().staking.active_for_race(race).unwrap_or_default().as_atomic(),
+            })
         }
         route if route.starts_with("/block/") => {
             let height = route

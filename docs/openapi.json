@@ -24,10 +24,10 @@
     "/fee-policy": {
       "get": {
         "operationId": "getFeePolicy",
-        "summary": "Get relay fee, transfer tax, exchange, and block reward policy",
+        "summary": "Get Novus transfer fee, transfer tax, exchange, and block reward policy",
         "responses": {
           "200": {
-            "description": "Chip War tax adjustments for the sender's race apply to every taxable transaction type. Base rates: race-currency transfer 1%, race-to-Gold conversion 5%, Gold transfer 2% and Gold-to-race conversion 5%, Gold-to-Novus conversion 10%. The modifier starts at 0 percentage points. Each settlement adds 2 points for a loss, adds 1 for a failure, and subtracts 1 for a win only when the modifier is above zero. Effective tax is the base rate plus the modifier, capped at 20%, and never below the base rate. Tax and conversion relay fees are paid in the source currency. Gold transfers are restricted to accounts of the sender's race. Novus transfers are global, tax-exempt, and pay only the Novus relay fee; that fee is credited directly to the miner of the block containing the transaction, regardless of miner race. Gold relay fees remain claimable through the tax vault. Gold converts one way at 1,000 Gold to 1 Novus; reverse conversion is unavailable.",
+            "description": "Only Novus transfers pay a size-based fee in Novus to the including block miner. All other transactions have no relay fee. Chip War tax adjustments for the sender's race apply to every taxable transaction type. The base tax rate is 1% for every taxable transfer and conversion. Loss and failure both add 1 point to a shared cumulative modifier, capped at +6 (7% total tax). A win subtracts 1 point down to a zero modifier, so tax never falls below the 1% base rate. Taxes use the source currency and are held in the originating race's vault, including Gold taxes; only miners of that race can claim them. Gold transfers are restricted to accounts of the sender's race. Novus transfers are global and tax-exempt. Gold converts one way at 1,000 Gold to 1 Novus; reverse conversion is unavailable.",
             "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } }
           }
         }
@@ -113,6 +113,17 @@
             "description": "Race assignment, or null if the account has not registered",
             "content": { "application/json": { "schema": { "type": "object", "required": ["race"], "properties": { "race": { "type": ["string", "null"], "enum": ["accretia", "bellato", "cora", null] } } } } }
           },
+          "400": { "description": "Invalid address" }
+        }
+      }
+    },
+    "/stake/{address}": {
+      "get": {
+        "operationId": "getStakePositions",
+        "summary": "Get race-native mining stake for an account",
+        "parameters": [{ "$ref": "#/components/parameters/Address" }],
+        "responses": {
+          "200": { "description": "Race pool stake epoch, delegator active stake, total active race pool stake, locked amount, and withdrawable amount", "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } } },
           "400": { "description": "Invalid address" }
         }
       }

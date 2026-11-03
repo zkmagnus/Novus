@@ -28,7 +28,8 @@ Account balance + nonce
           |
           +----> debit sender and advance nonce
           +----> credit recipients
-          +----> relay fee in Gold, or in Novus for Novus transfers; Novus relay fee goes directly to the block miner
+          +----> protocol tax is collected where the transaction type is taxable
+          +----> Novus transfer fee goes directly to the including block miner
 ```
 
 Conceptually:
@@ -36,7 +37,7 @@ Conceptually:
 ```text
 Amount        = currency quantity in atomic units
 Account       = address, per-currency balances, next nonce
-Transaction fee = Gold for race currency and Gold transfers; source currency for conversions; Novus for Novus transfers
+Transaction fee = only Novus transfers, paid in Novus to the including block miner
 Transaction tax = rates and denomination follow the transfer or conversion policy below
 ```
 
@@ -82,7 +83,7 @@ This prevents account balances from containing negative amounts.
 ## Account Model
 
 Each address has a balance and next nonce. A transaction signs the sender, nonce,
-recipient transfers, fee, and optional message. Nodes require the nonce to match
+recipient transfers, a Novus-only fee, and optional message. Nodes require the nonce to match
 the account state, debit the sender atomically, and credit each recipient. Block
 rewards credit the miner account directly. Rollbacks restore account snapshots.
 
@@ -98,7 +99,6 @@ The transaction intent contains the economic operation:
 sender
 nonce
 transfers
-fee
 protocol-calculated tax
 ```
 
@@ -163,7 +163,7 @@ Blocks become final after 10,080 confirmations. The node keeps a permanent final
 
 This means miners continue receiving the protocol-defined block subsidy as the chain grows.
 
-Novus is a global currency. Gold converts one way into Novus at a fixed rate of 1,000 Gold to 1 Novus; Novus cannot be converted back to Gold. Gold transfers are restricted to accounts of the sender's race, while Novus transfers can cross races. The base exchange rate for each race's native currency is 10,000 units per Gold, adjusted by Chip War by up to 20%. Chip War tax adjustments apply to every taxable transaction type, using the sender's race. Base rates are 1% for race-currency transfers, 5% for race-currency-to-Gold conversions, 2% for Gold transfers and 5% for Gold-to-race conversions, and 10% for Gold-to-Novus conversion. The Chip War tax modifier starts at 0 percentage points. At each settlement, a loss adds 2 points, a failure adds 1, and a win subtracts 1 only when the modifier is above 0. Each effective tax is its transaction's base rate plus the modifier, capped at 20%; it never falls below the base rate. Taxes are paid in the source currency. Conversion relay fees are also paid in the source currency, so users do not need an existing Gold balance to convert race currency to Gold. Novus transfers are exempt from protocol tax. Their Novus relay fees are credited directly to the miner of the block containing the transaction, regardless of the miner's race. Gold relay fees and transaction taxes remain in the tax vault for eligible miners to claim.
+Novus is a global currency. Gold converts one way into Novus at a fixed rate of 1,000 Gold to 1 Novus; Novus cannot be converted back to Gold. Gold transfers are restricted to accounts of the sender's race, while Novus transfers can cross races. The base exchange rate for each race's native currency is 10,000 units per Gold, adjusted by Chip War by up to 20%. Chip War tax adjustments apply to every taxable transaction type, using the sender's race. The base tax rate is 1% for all taxable transactions. The shared Chip War tax modifier starts at 0 percentage points. A loss or failure adds 1 point, cumulatively across both outcomes, up to +6 (7% total). A win subtracts 1 point down to a zero modifier, so tax never falls below the 1% base rate. Taxes are denominated in the source currency and held in the originating race's vault, including Gold taxes; only that race's miners can claim them. Novus transfers pay a size-based fee in Novus directly to the including block miner and are exempt from protocol tax. Other transactions have no relay fee.
 
 The initial global exchange vault holds 100 million Gold. Gold converted to Novus is burned. After each cumulative 100 million Gold converted, the protocol issues 100 million Gold back into the global exchange vault. Conversion progress, total Gold burned, and total Novus minted are consensus state and are available from `/status`.
 

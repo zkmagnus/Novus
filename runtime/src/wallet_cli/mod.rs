@@ -96,6 +96,7 @@ pub fn run_for_race(
         Some("history") => print_history(&args[1..]),
         Some("sign-spend") | Some("send") => sign_spend(&args[1..]),
         Some("convert") => transaction::convert_currency(&args[1..]),
+        Some("stake") => transaction::stake(&args[1..]),
         Some("version") | Some("--version") | Some("-V") => {
             println!("Novus wallet {}", env!("CARGO_PKG_VERSION"));
             Ok(())

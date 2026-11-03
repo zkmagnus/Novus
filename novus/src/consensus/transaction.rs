@@ -8,7 +8,9 @@ use super::{
     GOLD_TO_NOVUS_CONVERSION_TAX_PERCENT, GOLD_TO_RACE_CONVERSION_TAX_PERCENT,
     GOLD_TRANSFER_TAX_PERCENT, RACE_TO_GOLD_CONVERSION_TAX_PERCENT, TRANSFER_TAX_PERCENT,
 };
-use crate::transaction::{AccountIntent, Amount, Currency, IntentError, Race, Transaction};
+use crate::transaction::{
+    AccountIntent, Amount, Currency, IntentError, Race, StakeAction, Transaction,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidatedTransaction {
@@ -32,6 +34,15 @@ pub trait TransactionStateView {
         crate::transaction::RACE_CURRENCY_PER_GOLD
     }
     fn nonce(&self, address: Address) -> u64;
+    fn locked_stake(&self, _race: Race, _delegator: Address) -> Amount {
+        Amount::ZERO
+    }
+    fn active_stake(&self, _race: Race, _delegator: Address) -> Amount {
+        Amount::ZERO
+    }
+    fn withdrawable_stake(&self, _race: Race, _delegator: Address) -> Amount {
+        Amount::ZERO
+    }
 }
 
 pub fn validate_transaction(
@@ -52,6 +63,15 @@ pub fn validate_transaction(
     }
 
     let intent = &transaction.intent;
+    if !intent.fee.is_zero()
+        && (intent.conversion.is_some()
+            || intent
+                .transfers
+                .first()
+                .is_none_or(|transfer| transfer.currency != Currency::Novus))
+    {
+        return Err(TransactionConsensusError::InvalidFee);
+    }
     if intent.race != intent.sender.race().into() {
         return Err(TransactionConsensusError::SenderRaceMismatch);
     }
@@ -64,6 +84,17 @@ pub fn validate_transaction(
     }
     if intent.register_race && state.race(intent.sender).is_some() {
         return Err(TransactionConsensusError::SenderRaceMismatch);
+    }
+    if let Some(action) = intent.stake_action {
+        validate_stake_action(intent, action, state)?;
+        let txid = transaction
+            .transaction_id()
+            .map_err(|_| TransactionConsensusError::Encoding)?;
+        return Ok(ValidatedTransaction {
+            intent: transaction.intent,
+            txid,
+            taxes: BTreeMap::new(),
+        });
     }
     let taxes = calculate_transfer_taxes_with_policy(
         intent,
@@ -132,7 +163,9 @@ fn validate_conversion(
         return Err(TransactionConsensusError::InvalidConversionAmount);
     }
     let mut required = BTreeMap::new();
-    required.insert(intent.fee_currency(), intent.fee);
+    if !intent.fee.is_zero() {
+        return Err(TransactionConsensusError::InvalidFee);
+    }
     let (vault_currency, vault_required) = match (conversion.from, conversion.to) {
         (Currency::Gold, Currency::Novus) => (Currency::Gold, Amount::ZERO),
         (Currency::Gold, _) => (conversion.to, Amount::from_atomic(payout)),
@@ -173,6 +206,49 @@ fn validate_conversion(
         .is_none()
     {
         return Err(TransactionConsensusError::InsufficientExchangeReserve);
+    }
+    Ok(())
+}
+
+fn validate_stake_action(
+    intent: &AccountIntent,
+    action: StakeAction,
+    state: &impl TransactionStateView,
+) -> Result<(), TransactionConsensusError> {
+    if state.nonce(intent.sender) != intent.nonce {
+        return Err(TransactionConsensusError::InvalidNonce);
+    }
+    let currency = Currency::for_race_reward(intent.race);
+    match action {
+        StakeAction::Delegate { amount } => {
+            // Delegated amounts have already been debited from the account
+            // balance; `locked_stake` tracks escrow/unbonding metadata only.
+            if state
+                .balance(intent.sender, currency)
+                .checked_sub(amount)
+                .is_none()
+            {
+                return Err(TransactionConsensusError::InsufficientBalance);
+            }
+        }
+        StakeAction::Undelegate { amount } => {
+            if state
+                .active_stake(intent.race, intent.sender)
+                .checked_sub(amount)
+                .is_none()
+            {
+                return Err(TransactionConsensusError::InsufficientStake);
+            }
+        }
+        StakeAction::Withdraw { amount } => {
+            if state
+                .withdrawable_stake(intent.race, intent.sender)
+                .checked_sub(amount)
+                .is_none()
+            {
+                return Err(TransactionConsensusError::StakeNotWithdrawable);
+            }
+        }
     }
     Ok(())
 }
@@ -296,7 +372,12 @@ fn validate_account_transfer(
         }
     }
     let mut required = BTreeMap::<Currency, Amount>::new();
-    required.insert(intent.fee_currency(), intent.fee);
+    if !intent.fee.is_zero() {
+        if intent.transfers[0].currency != Currency::Novus {
+            return Err(TransactionConsensusError::InvalidFee);
+        }
+        required.insert(Currency::Novus, intent.fee);
+    }
     for transfer in &intent.transfers {
         let current = required
             .get(&transfer.currency)
@@ -340,12 +421,15 @@ pub enum TransactionConsensusError {
     InsufficientExchangeReserve,
     InvalidTaxPolicy,
     InvalidTaxAmount,
+    InvalidFee,
     InvalidConversionAmount,
     StaleExchangeQuote,
     AmountOverflow,
     SenderRaceMismatch,
     CurrencyNotOwnedBySenderRace,
     WrongCurrencyRecipientRace,
+    InsufficientStake,
+    StakeNotWithdrawable,
 }
 
 impl fmt::Display for TransactionConsensusError {
@@ -369,6 +453,7 @@ impl fmt::Display for TransactionConsensusError {
             Self::InvalidTaxAmount => formatter.write_str(
                 "signed tax does not match the active protocol tax; create a new transaction",
             ),
+            Self::InvalidFee => formatter.write_str("fees are only allowed for Novus transfers"),
             Self::InvalidConversionAmount => formatter
                 .write_str("conversion amount cannot produce an exact output at this quote"),
             Self::StaleExchangeQuote => {
@@ -384,6 +469,10 @@ impl fmt::Display for TransactionConsensusError {
             Self::WrongCurrencyRecipientRace => {
                 formatter.write_str("race currency recipient belongs to another race")
             }
+            Self::InsufficientStake => {
+                formatter.write_str("active delegated stake is insufficient")
+            }
+            Self::StakeNotWithdrawable => formatter.write_str("stake is still locked or unbonding"),
         }
     }
 }
@@ -427,10 +516,11 @@ mod tests {
             nonce: 4,
             transfers: vec![crate::transaction::Transfer::new(
                 sender,
-                Currency::Gold,
+                Currency::Novus,
                 Amount::from_atomic(90),
             )],
             conversion: None,
+            stake_action: None,
             fee: Amount::from_atomic(10),
             tax: Amount::ZERO,
             message: None,
@@ -452,7 +542,7 @@ mod tests {
     }
 
     #[test]
-    fn fee_and_tax_follow_the_transferred_currency() {
+    fn base_tax_is_uniform_across_taxable_currencies() {
         let sender = Address::new([7; crypto::ADDRESS_SIZE]);
         let amount = Amount::from_atomic(1_000);
         let mut intent = AccountIntent {
@@ -466,19 +556,21 @@ mod tests {
                 amount,
             )],
             conversion: None,
-            fee: Amount::from_atomic(10),
+            stake_action: None,
+            fee: Amount::ZERO,
             tax: Amount::ZERO,
             message: None,
         };
 
-        assert_eq!(intent.fee_currency(), Currency::Gold);
         let taxes = calculate_transfer_taxes(&intent).unwrap();
-        assert_eq!(taxes.get(&Currency::Gold), Some(&Amount::from_atomic(20)));
+        assert_eq!(taxes.get(&Currency::Gold), Some(&Amount::from_atomic(10)));
 
         intent.transfers[0].currency = Currency::Cp;
-        assert_eq!(intent.fee_currency(), Currency::Gold);
         let taxes = calculate_transfer_taxes(&intent).unwrap();
         assert_eq!(taxes.get(&Currency::Cp), Some(&Amount::from_atomic(10)));
+
+        intent.transfers[0].currency = Currency::Novus;
+        assert!(calculate_transfer_taxes(&intent).unwrap().is_empty());
     }
 
     #[test]
@@ -494,6 +586,7 @@ mod tests {
                 crate::transaction::Transfer::new(sender, Currency::Cp, Amount::from_atomic(1)),
             ],
             conversion: None,
+            stake_action: None,
             fee: Amount::ZERO,
             tax: Amount::ZERO,
             message: None,

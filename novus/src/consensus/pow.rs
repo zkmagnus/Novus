@@ -24,6 +24,13 @@ pub fn verify_pow(header: &Header, expected_difficulty: u32) -> Result<(), Conse
 
     let target =
         PoWTarget::from_compact(expected_difficulty).ok_or(ConsensusError::InvalidDifficulty)?;
+    verify_pow_at_target(header, target)
+}
+
+/// Verifies a header against a state-derived target. `target_bits` in the
+/// header continues to commit the network difficulty; stake only adjusts the
+/// work target derived from the parent state.
+pub fn verify_pow_at_target(header: &Header, target: PoWTarget) -> Result<(), ConsensusError> {
     if target.meets(&calculate_work(header)?) {
         Ok(())
     } else {

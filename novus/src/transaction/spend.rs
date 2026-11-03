@@ -202,11 +202,21 @@ pub struct AccountIntent {
     pub transfers: Vec<Transfer>,
     /// Converts `from` into `to` at the signed protocol quote.
     pub conversion: Option<CurrencyConversion>,
-    /// Paid in Gold for race and Gold transactions, or Novus for Novus transfers.
+    /// Optional race-native stake operation signed as part of this intent.
+    pub stake_action: Option<StakeAction>,
+    /// Relay fee, permitted only for Novus transfers and paid to the including miner.
     pub fee: Amount,
     /// Protocol-calculated tax in the source currency, signed for visibility and checked by consensus.
     pub tax: Amount,
     pub message: Option<String>,
+}
+
+/// Race-native mining-pool stake action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub enum StakeAction {
+    Delegate { amount: Amount },
+    Undelegate { amount: Amount },
+    Withdraw { amount: Amount },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
@@ -219,16 +229,13 @@ pub struct CurrencyConversion {
 }
 
 impl AccountIntent {
-    /// Transfers pay in their native relay currency. Conversions pay in the
-    /// source currency so a wallet can make its first conversion without
-    /// already holding the destination currency.
+    /// Novus transfers pay fees in Novus; other transaction types have no fee currency.
     pub fn fee_currency(&self) -> Currency {
-        if let Some(conversion) = self.conversion {
-            conversion.from
-        } else if self
-            .transfers
-            .first()
-            .is_some_and(|transfer| transfer.currency == Currency::Novus)
+        if self.conversion.is_none()
+            && self
+                .transfers
+                .first()
+                .is_some_and(|transfer| transfer.currency == Currency::Novus)
         {
             Currency::Novus
         } else {
@@ -237,8 +244,29 @@ impl AccountIntent {
     }
 
     pub fn validate_structure(&self) -> Result<(), IntentError> {
-        if self.transfers.is_empty() == self.conversion.is_none() {
+        let has_spend = !self.transfers.is_empty() || self.conversion.is_some();
+        let operation_count = usize::from(has_spend) + usize::from(self.stake_action.is_some());
+        if operation_count != 1 {
             return Err(IntentError::EmptyOutputs);
+        }
+        if let Some(action) = self.stake_action {
+            let amount = match action {
+                StakeAction::Delegate { amount, .. }
+                | StakeAction::Undelegate { amount, .. }
+                | StakeAction::Withdraw { amount } => amount,
+            };
+            if amount.is_zero() {
+                return Err(IntentError::ZeroAmount);
+            }
+            if !self.transfers.is_empty()
+                || self.conversion.is_some()
+                || !self.fee.is_zero()
+                || !self.tax.is_zero()
+                || self.message.is_some()
+                || self.register_race
+            {
+                return Err(IntentError::InvalidStakeAction);
+            }
         }
         if self.message.as_ref().is_some_and(|m| {
             m.is_empty() || m.len() > MAX_SPEND_MESSAGE_BYTES || m.chars().any(char::is_control)

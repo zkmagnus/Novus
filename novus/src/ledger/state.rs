@@ -4,6 +4,7 @@ use super::account::AccountState;
 use super::chip_war::{ChipWarRollback, ChipWarState};
 use super::exchange::{ExchangeVault, ExchangeVaultRollback};
 use super::tax::{TaxVault, TaxVaultRollback};
+use super::staking::StakeState;
 use crate::transaction::{Amount, Currency};
 use std::collections::BTreeMap;
 
@@ -17,6 +18,7 @@ pub struct LedgerState {
     pub exchange_vault: ExchangeVault,
     pub chip_war: ChipWarState,
     pub global_currency: GlobalCurrencyState,
+    pub staking: StakeState,
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, Default, PartialEq, Eq)]
@@ -51,6 +53,7 @@ pub struct StateRollbackJournal {
     pub exchange_vault: Option<ExchangeVaultRollback>,
     pub chip_war: Option<ChipWarRollback>,
     pub global_currency: Option<GlobalCurrencyRollback>,
+    pub staking: Option<StakeState>,
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, PartialEq, Eq)]

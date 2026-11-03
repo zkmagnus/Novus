@@ -97,7 +97,9 @@ pub(super) fn reconcile_mempool(
         if encoded.len() > novus::blockchain::MAX_BLOCK_SIZE {
             continue;
         }
-        if !meets_minimum_relay_fee(&transaction, encoded.len()) {
+        if transaction.intent.fee.as_atomic()
+            < required_fee_for_novus(&transaction, encoded.len()).unwrap_or(u128::MAX)
+        {
             continue;
         }
         let Ok(validated) = validate_transaction(transaction.clone(), chain, height.0, &state)
@@ -131,12 +133,11 @@ pub(super) fn validate_mempool(
         if encoded.len() > novus::blockchain::MAX_BLOCK_SIZE {
             return Err("transaction cannot fit in a block".into());
         }
-        let required_fee = minimum_relay_fee(encoded.len())?;
-        let paid_fee = transaction_fee_amount(transaction)?;
-        if paid_fee < required_fee {
+        let required_fee = required_fee_for_novus(transaction, encoded.len())?;
+        if transaction.intent.fee.as_atomic() < required_fee {
             return Err(format!(
-                "mempool transaction fee in {:?} is too low: paid {paid_fee} atomic units, required {required_fee} atomic units for {} bytes",
-                transaction.intent.fee_currency(),
+                "Novus relay fee is too low: paid {} atomic units, required {required_fee} atomic units for {} bytes",
+                transaction.intent.fee.as_atomic(),
                 encoded.len()
             ));
         }
@@ -149,21 +150,20 @@ pub(super) fn validate_mempool(
     Ok(())
 }
 
-pub(super) fn minimum_relay_fee(encoded_size: usize) -> Result<u128, String> {
+fn required_fee_for_novus(transaction: &Transaction, encoded_size: usize) -> Result<u128, String> {
+    let is_novus_transfer = transaction.intent.conversion.is_none()
+        && transaction
+            .intent
+            .transfers
+            .first()
+            .is_some_and(|transfer| transfer.currency == novus::transaction::Currency::Novus);
+    if !is_novus_transfer {
+        return Ok(0);
+    }
     u128::try_from(encoded_size)
         .ok()
-        .and_then(|size| size.checked_mul(u128::from(MIN_RELAY_FEE_ATOMIC_UNITS_PER_BYTE)))
-        .ok_or("minimum relay fee overflow".into())
-}
-
-pub(super) fn meets_minimum_relay_fee(transaction: &Transaction, encoded_size: usize) -> bool {
-    minimum_relay_fee(encoded_size)
-        .and_then(|required| transaction_fee_amount(transaction).map(|paid| paid >= required))
-        .unwrap_or(false)
-}
-
-pub(super) fn transaction_fee_amount(transaction: &Transaction) -> Result<u128, String> {
-    Ok(transaction.intent.fee.as_atomic())
+        .and_then(|size| size.checked_mul(1))
+        .ok_or_else(|| "minimum Novus relay fee overflow".to_string())
 }
 
 pub(super) fn read_mempool(path: &Path) -> Result<Vec<Transaction>, String> {

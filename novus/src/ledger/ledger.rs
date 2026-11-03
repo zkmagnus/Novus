@@ -9,8 +9,8 @@ use common::{ChainContext, Height};
 use crate::{
     blockchain::{Block, Chain, ChainError},
     consensus::{
-        ApplyBlockState, ConsensusError, EmissionError, FINALITY_DEPTH_BLOCKS,
-        TransactionConsensusError, TransactionStateView, ValidatedBlock, validate_emission,
+        ApplyBlockState, ConsensusError, EmissionError, FINALITY_DEPTH_BLOCKS, PoWTarget,
+        TransactionConsensusError, TransactionStateView, ValidatedBlock, Work, validate_emission,
         validate_transaction,
     },
     ledger::{LedgerState, StateError, StateRollbackJournal},
@@ -22,6 +22,8 @@ pub struct Ledger {
     pub state: LedgerState,
 
     journals: BTreeMap<Height, Vec<StateRollbackJournal>>,
+    block_works: BTreeMap<Height, Work>,
+    cumulative_work: Work,
 
     chain_context: Option<ChainContext>,
     finalized_height: u64,
@@ -31,6 +33,7 @@ struct ExecutedBlock {
     journals: Vec<StateRollbackJournal>,
     state_root: StateRoot,
     block_size: u32,
+    block_work: Work,
     chain_context: ChainContext,
 }
 
@@ -51,6 +54,14 @@ impl Ledger {
         Height(self.finalized_height)
     }
 
+    pub const fn cumulative_work(&self) -> Work {
+        self.cumulative_work
+    }
+
+    pub fn work_at(&self, height: Height) -> Option<Work> {
+        self.block_works.get(&height).copied()
+    }
+
     pub fn state(&self) -> &LedgerState {
         &self.state
     }
@@ -65,7 +76,7 @@ impl Ledger {
     ) -> Result<(StateRoot, u32), LedgerError> {
         let chain_context = self.chain_context_for(block)?;
         let mut staged_state = self.state.clone();
-        let executed = Self::execute_block(&mut staged_state, block, chain_context)?;
+        let executed = Self::execute_block(&mut staged_state, block, chain_context, false)?;
         Ok((executed.state_root, executed.block_size))
     }
 
@@ -81,13 +92,32 @@ impl Ledger {
         state: &mut LedgerState,
         block: &Block,
         chain_context: ChainContext,
+        enforce_pow: bool,
     ) -> Result<ExecutedBlock, LedgerError> {
         let mut journals = Vec::new();
         let block_size = u32::try_from(block.size()?).map_err(|_| LedgerError::InvalidBlockSize)?;
         let height = block.height();
+        let mut block_work = Work::ZERO;
 
         let result = (|| {
             if !block.is_genesis() {
+                let race = crate::transaction::Race::from(block.miner_address().race());
+                let active_stake = state
+                    .staking
+                    .active_for_race(race)
+                    .ok_or(StateError::AmountOverflow)?;
+                let network_target = PoWTarget::from_compact(block.target_bits())
+                    .ok_or(ConsensusError::InvalidDifficulty)?;
+                let pow_limit = crate::consensus::stake_target_limit();
+                let effective_target =
+                    crate::consensus::effective_target(network_target, active_stake, pow_limit)
+                        .ok_or(ConsensusError::InvalidDifficulty)?;
+                if enforce_pow {
+                    crate::consensus::verify_pow_at_target(&block.header, effective_target)?;
+                }
+                block_work = crate::consensus::stake_adjusted_work(effective_target)
+                    .ok_or(ConsensusError::InvalidDifficulty)?;
+
                 let emission = validate_emission(block)?;
                 journals.push(state.apply_emission(
                     emission.recipient(),
@@ -128,6 +158,7 @@ impl Ledger {
             journals,
             state_root,
             block_size,
+            block_work,
             chain_context,
         })
     }
@@ -150,6 +181,15 @@ impl Ledger {
             self.state.rollback_state(journal)?;
         }
 
+        let block_work = self
+            .block_works
+            .remove(&height)
+            .ok_or(LedgerError::MissingRollbackJournal)?;
+        self.cumulative_work = self
+            .cumulative_work
+            .checked_sub(block_work)
+            .ok_or(LedgerError::State(StateError::AmountOverflow))?;
+
         let block = self.chain.remove_tip(hash)?;
 
         self.journals.remove(&height);
@@ -166,7 +206,7 @@ impl Ledger {
         let height = block.height();
         self.chain.validate_next_block(block)?;
         let chain_context = self.chain_context_for(block)?;
-        let executed = Self::execute_block(&mut self.state, block, chain_context)?;
+        let executed = Self::execute_block(&mut self.state, block, chain_context, true)?;
 
         if executed.block_size != block.block_size() {
             for journal in executed.journals.into_iter().rev() {
@@ -186,6 +226,8 @@ impl Ledger {
             }
             return Err(error.into());
         }
+        self.block_works.insert(height, executed.block_work);
+        self.cumulative_work = self.cumulative_work.saturating_add(executed.block_work);
         self.chain_context = Some(executed.chain_context);
         self.journals.insert(height, executed.journals);
         self.finalized_height = self
@@ -204,6 +246,24 @@ impl ApplyBlockState for Ledger {
 
     fn consensus_chain(&self) -> &Chain {
         &self.chain
+    }
+
+    fn validate_block_pow(&self, block: &Block) -> Result<(), ConsensusError> {
+        if block.is_genesis() {
+            return Ok(());
+        }
+        let race = crate::transaction::Race::from(block.miner_address().race());
+        let active_stake = self
+            .state
+            .staking
+            .active_for_race(race)
+            .ok_or(ConsensusError::InvalidDifficulty)?;
+        let network_target = PoWTarget::from_compact(block.target_bits())
+            .ok_or(ConsensusError::InvalidDifficulty)?;
+        let pow_limit = crate::consensus::stake_target_limit();
+        let target = crate::consensus::effective_target(network_target, active_stake, pow_limit)
+            .ok_or(ConsensusError::InvalidDifficulty)?;
+        crate::consensus::verify_pow_at_target(&block.header, target)
     }
 
     fn commit_validated_block(&mut self, block: ValidatedBlock) -> Result<(), Self::Error> {
@@ -241,6 +301,27 @@ impl TransactionStateView for LedgerState {
     fn race_exchange_rate(&self, race: crate::transaction::Race) -> u128 {
         self.chip_war.exchange_rate(race)
     }
+    fn locked_stake(
+        &self,
+        race: crate::transaction::Race,
+        delegator: crypto::Address,
+    ) -> crate::transaction::Amount {
+        self.staking.locked_by(race, delegator)
+    }
+    fn active_stake(
+        &self,
+        race: crate::transaction::Race,
+        delegator: crypto::Address,
+    ) -> crate::transaction::Amount {
+        self.staking.active_delegation(race, delegator)
+    }
+    fn withdrawable_stake(
+        &self,
+        race: crate::transaction::Race,
+        delegator: crypto::Address,
+    ) -> crate::transaction::Amount {
+        self.staking.withdrawable_by(race, delegator)
+    }
 }
 
 //
@@ -257,18 +338,31 @@ impl LedgerState {
             && self.exchange_vault == crate::ledger::ExchangeVault::default()
             && self.chip_war == crate::ledger::ChipWarState::default()
             && self.global_currency == crate::ledger::GlobalCurrencyState::default()
+            && self.staking.is_empty()
         {
             return Ok(StateRoot::ZERO);
         }
 
-        let state = canonical_bytes(&(
-            &self.accounts,
-            &self.novus,
-            &self.tax_vault,
-            &self.exchange_vault,
-            &self.chip_war,
-            &self.global_currency,
-        ))?;
+        let state = if self.staking.is_empty() {
+            canonical_bytes(&(
+                &self.accounts,
+                &self.novus,
+                &self.tax_vault,
+                &self.exchange_vault,
+                &self.chip_war,
+                &self.global_currency,
+            ))?
+        } else {
+            canonical_bytes(&(
+                &self.accounts,
+                &self.novus,
+                &self.tax_vault,
+                &self.exchange_vault,
+                &self.chip_war,
+                &self.global_currency,
+                &self.staking,
+            ))?
+        };
 
         Ok(StateRoot(
             domain(HashDomain::ProtocolState, &state).into_bytes(),

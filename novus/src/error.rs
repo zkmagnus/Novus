@@ -218,6 +218,7 @@ mod transaction_errors {
         InvalidConversionAmount,
         InvalidMessage,
         InvalidAssetCall,
+        InvalidStakeAction,
         Encoding,
     }
 
@@ -236,6 +237,7 @@ mod transaction_errors {
                     "spend message must be 1-256 UTF-8 bytes without control characters",
                 ),
                 Self::InvalidAssetCall => formatter.write_str("asset call is structurally invalid"),
+                Self::InvalidStakeAction => formatter.write_str("stake action has incompatible transaction fields"),
                 Self::Encoding => formatter.write_str("intent encoding failed"),
             }
         }

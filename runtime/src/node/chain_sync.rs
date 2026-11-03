@@ -6,7 +6,7 @@ pub(super) fn synchronize_headers(
     stream: &mut TcpStream,
     peer: &Handshake,
 ) -> Result<HeaderSyncResult, String> {
-    let (ledger, header_checkpoints, local_cumulative_work) =
+    let (ledger, header_checkpoints, _local_cumulative_work) =
         load_or_initialize_header_snapshot(database)?;
 
     let local_locator = ledger_header_locator(&ledger)?;
@@ -58,27 +58,20 @@ pub(super) fn synchronize_headers(
             }
 
             if state.header.hash().map_err(|error| error.to_string())?.0 != peer.tip_hash
-                || state.cumulative_work.to_be_limbs() != peer.cumulative_work
+                || state.height != peer.tip_height
             {
-                return Err("peer handshake tip/work does not match verified headers".into());
+                return Err("peer handshake tip does not match downloaded headers".into());
             }
 
             let local_hash = ledger.tip_hash().ok_or("local header chain has no tip")?.0;
-            let peer_work = state.cumulative_work;
-
-            let preferred = compare_chain_tips(
-                peer_work,
-                BlockHash(peer.tip_hash),
-                local_cumulative_work,
-                BlockHash(local_hash),
-            )
-            .is_gt();
+            // Header work is provisional: stake-adjusted work can only be
+            // verified after block bodies and parent ledger states are loaded.
+            let preferred = peer.tip_hash != local_hash;
 
             return Ok(HeaderSyncResult {
                 ancestor_height: ancestor_height.unwrap_or(state.height),
                 ancestor_hash: BlockHash(ancestor_hash.unwrap_or(ancestor)),
                 headers: downloaded,
-                peer_work,
                 preferred,
             });
         }
@@ -206,7 +199,7 @@ pub(super) fn synchronize_blocks(
     let _mutation = state_mutation_lock()?
         .lock()
         .map_err(|_| "state mutation lock is poisoned")?;
-    let (cached_ledger, _header_checkpoints, current_cumulative_work) =
+    let (cached_ledger, _header_checkpoints, _current_cumulative_work) =
         load_or_initialize_header_snapshot(database)?;
     let mut staged = cached_ledger.as_ref().clone();
     if sync.ancestor_height < staged.finalized_height() {
@@ -220,17 +213,7 @@ pub(super) fn synchronize_blocks(
         .map_err(|error| error.to_string())?
         .unwrap_or(sync.ancestor_hash);
     let current_tip = old_tip.ok_or("canonical chain has no tip during reorg")?;
-    if !compare_chain_tips(
-        sync.peer_work,
-        new_tip,
-        current_cumulative_work,
-        current_tip,
-    )
-    .is_gt()
-    {
-        println!("sync: downloaded peer branch is no longer preferred after local tip advanced");
-        return Ok(0);
-    }
+    let current_cumulative_work = staged.cumulative_work();
     let mut disconnect = Vec::new();
     let mut height = staged.tip_height();
     while height.is_some_and(|height| height > sync.ancestor_height) {
@@ -281,6 +264,19 @@ pub(super) fn synchronize_blocks(
     for block in apply {
         apply_block(&mut staged, block)
             .map_err(|error| format!("apply synchronized block: {error}"))?;
+    }
+    let new_cumulative_work = staged.cumulative_work();
+    let staged_tip = staged.tip_hash().ok_or("staged chain has no tip")?;
+    if !compare_chain_tips(
+        new_cumulative_work,
+        staged_tip,
+        current_cumulative_work,
+        current_tip,
+    )
+    .is_gt()
+    {
+        println!("sync: validated peer branch does not have more cumulative work");
+        return Ok(0);
     }
     let mut mempool_candidates = disconnected_transactions;
     mempool_candidates.extend(read_mempool(database)?);
@@ -385,18 +381,14 @@ pub(super) fn ledger_header_state_at_height(
 
         let height = Height(value);
 
-        let block = ledger
+        ledger
             .chain
             .block(&height)
             .ok_or("canonical block is missing after checkpoint")?;
 
-        let block_work = novus::consensus::block_work(block.target_bits()).ok_or_else(|| {
-            format!(
-                "invalid target bits {:08x} at height {}",
-                block.target_bits(),
-                height.0,
-            )
-        })?;
+        let block_work = ledger
+            .work_at(height)
+            .ok_or("validated block work is missing from ledger")?;
 
         cumulative_work = cumulative_work.saturating_add(block_work);
 

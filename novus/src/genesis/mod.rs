@@ -36,7 +36,7 @@ pub const EXPECTED_GENESIS_HASH: BlockHash = BlockHash([
 // -----------------------------------------------------------------------------
 
 /// Development baseline for the chain specification structure.
-pub const CHAIN_SPEC_VERSION: u32 = 1;
+pub const CHAIN_SPEC_VERSION: u32 = 11;
 
 #[derive(BorshSerialize)]
 struct ChainSpecIdentity<'a> {
@@ -73,6 +73,7 @@ struct ChainSpecIdentity<'a> {
     chip_war_epoch_blocks: u64,
     race_tax_modifier_min_percent_points: u8,
     race_tax_modifier_max_percent_points: u8,
+    race_tax_effective_max_percent: u8,
     race_tax_modifier_initial_percent_points: u8,
     race_tax_loss_increase_percentage_points: u8,
     race_tax_failure_increase_percentage_points: u8,
@@ -103,6 +104,11 @@ struct ChainSpecIdentity<'a> {
 
     // Native protocol identity
     transaction_format: &'a str,
+    stake_epoch_policy: &'a str,
+    stake_reference_atomic: u128,
+    stake_boost_scale: u32,
+    stake_max_boost_ppm: u32,
+    stake_pow_policy: &'a str,
 }
 
 pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
@@ -144,6 +150,7 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
         chip_war_epoch_blocks: crate::ledger::CHIP_WAR_EPOCH_BLOCKS,
         race_tax_modifier_min_percent_points: crate::ledger::MIN_RACE_TAX_MODIFIER_PERCENT,
         race_tax_modifier_max_percent_points: crate::ledger::MAX_RACE_TAX_MODIFIER_PERCENT,
+        race_tax_effective_max_percent: crate::ledger::MAX_EFFECTIVE_TAX_PERCENT,
         race_tax_modifier_initial_percent_points: crate::ledger::BASE_RACE_TAX_MODIFIER_PERCENT,
         race_tax_loss_increase_percentage_points: crate::ledger::RACE_TAX_LOSS_INCREASE_PERCENT,
         race_tax_failure_increase_percentage_points:
@@ -155,13 +162,13 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
         exchange_rate_policy: "chip-war-winner-lower-loser-raise-failure-unchanged-clamp-base-10000-v2",
         exchange_rounding_policy: "rational-floor-to-smallest-unit-v1",
         chip_war_outcome_policy: "unique-scores-high-wins-low-loses-middle-failure-any-tie-all-failure-v1",
-        race_tax_application_policy: "chip-war-modifier-applies-to-all-taxable-types;race-transfer-base1-race-to-gold-base5-gold-transfer-base2-gold-to-race-base5-gold-to-novus-base10;initial-modifier-zero-loss-plus2-failure-plus1-win-minus1-floor-zero-effective-cap20;novus-transfer-exempt-v8",
+        race_tax_application_policy: "uniform-base1-percent-on-all-taxable-types;loss-plus1-failure-plus1-shared-cumulative-modifier-cap6;win-minus1-floor-zero;effective-tax-cap7;novus-transfer-exempt-v8",
         block_reward_currency_policy: "miner-race-native-currency-v1",
-        fee_tax_vault_policy: "transfer-fee-native-gold-or-novus;conversion-fee-source-currency;gold-fee-tax-gold;novus-fee-direct-to-including-block-miner-any-race;novus-tax-exempt-v2",
+        fee_tax_vault_policy: "all-protocol-taxes-keyed-by-origin-race-and-currency;only-origin-race-miners-claim-tax-vault;novus-transfer-fee-direct-to-including-block-miner-any-race;novus-tax-exempt-v3",
         gold_transfer_policy: "gold-transfer-sender-race-only;novus-transfer-global-v1",
         currency_conversion_policy: "one-way-1000-gold-to-1-novus;chip-war-race-currency-gold-exchange-v2",
-        fee_denomination_policy: "transfers-race-currency-and-gold-pay-gold;conversions-pay-source-currency;novus-transfers-pay-novus-v2",
-        tax_denomination_policy: "race-transfer-tax-native;race-to-gold-conversion-tax-source-currency;gold-transfer-and-gold-to-novus-tax-gold;novus-transfer-tax-exempt-v3",
+        fee_denomination_policy: "novus-transfers-pay-size-based-fee-in-novus-v1;all-other-transactions-no-fee",
+        tax_denomination_policy: "all-taxes-denominated-in-source-currency-and-held-in-origin-race-vault;novus-transfer-tax-exempt-v3",
         gold_supply_cap: crate::ledger::GOLD_SUPPLY_CAP.as_atomic(),
         gold_refill_policy: "burn-gold-for-novus-refill-100m-after-each-100m-cumulative-conversion-to-global-exchange-vault-v1",
         gold_per_novus_conversion_rate: crate::transaction::GOLD_PER_NOVUS,
@@ -174,7 +181,12 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
 
         hash_size: HASH_SIZE as u32,
 
-        transaction_format: "account-nonce-single-currency-transfer-five-currencies-amount-atomic-decimals-6-explicit-signed-tax-gold-fee-novus-fee-one-way-conversion-v3",
+        transaction_format: "account-nonce-single-currency-transfer-five-currencies-amount-atomic-decimals-6-explicit-signed-tax-novus-transfer-fee-only-one-way-conversion-race-pool-stake-delegate-undelegate-withdraw-v9",
+        stake_epoch_policy: "delegate-activates-after-one-completed-chip-war-epoch;undelegate-withdrawable-after-one-completed-chip-war-epoch;chip-war-epoch-3-days-v1",
+        stake_reference_atomic: crate::consensus::STAKE_REFERENCE_ATOMIC,
+        stake_boost_scale: crate::consensus::STAKE_BOOST_SCALE,
+        stake_max_boost_ppm: crate::consensus::STAKE_MAX_BOOST_PPM,
+        stake_pow_policy: "network-difficulty-in-header;parent-state-total-active-race-pool-stake-boosts-every-miner-in-race-to-maximum-2x;stake-has-no-subsidy-or-tax-reward;absolute-target-limit-uint256-max;chainwork-from-effective-target;header-work-provisional-until-full-block-state-validation-v4",
     };
 
     let bytes = crypto::canonical_bytes(&identity).map_err(GenesisError::Encoding)?;

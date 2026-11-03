@@ -23,13 +23,10 @@ pub(super) fn gossip_inventory(database: &Path) -> Result<GossipInventory, Strin
 }
 
 pub(super) fn inventory_preferred(candidate: &GossipInventory, current: &GossipInventory) -> bool {
-    compare_chain_tips(
-        Work::from_be_limbs(candidate.cumulative_work),
-        BlockHash(candidate.tip_hash),
-        Work::from_be_limbs(current.cumulative_work),
-        BlockHash(current.tip_hash),
-    )
-    .is_gt()
+    // Peer-advertised cumulative work is not trusted for stake-aware chains.
+    // A different tip is enough to request headers and bodies; body validation
+    // derives and compares the real branch work locally.
+    candidate.tip_hash != current.tip_hash
 }
 
 pub(super) fn handshake_from_inventory(

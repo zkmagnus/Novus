@@ -1,5 +1,5 @@
 use super::*;
-use novus::transaction::{Currency, CurrencyConversion, Race};
+use novus::transaction::{Currency, CurrencyConversion, Race, StakeAction};
 
 #[derive(Deserialize)]
 struct AccountLookup {
@@ -66,7 +66,7 @@ pub(super) fn sign_spend(args: &[String]) -> Result<(), String> {
     }
     let nonce = account_nonce(rpc, &wallet)?;
     let policy: ExchangeRatePolicy = http_get_json(rpc, "/fee-policy")?;
-    let transaction = automatic_fee_transaction(|fee| {
+    let transaction = automatic_fee_transaction(currency == Currency::Novus, |fee| {
         let mut intent = AccountIntent {
             sender: wallet.address(),
             race: requested_race,
@@ -78,6 +78,7 @@ pub(super) fn sign_spend(args: &[String]) -> Result<(), String> {
             nonce,
             transfers: vec![Transfer::in_currency(recipient, currency, amount)],
             conversion: None,
+            stake_action: None,
             fee: Amount::from_atomic(fee),
             tax: Amount::ZERO,
             message: message.clone(),
@@ -139,7 +140,7 @@ pub(super) fn convert_currency(args: &[String]) -> Result<(), String> {
     novus::transaction::conversion_output_amount(amount.as_atomic(), currency, to, rate)
         .ok_or("conversion output amount overflow at the current exchange rate")?;
     let nonce = account_nonce(rpc, &wallet)?;
-    let transaction = automatic_fee_transaction(|fee| {
+    let transaction = automatic_fee_transaction(false, |fee| {
         let mut intent = AccountIntent {
             sender: wallet.address(),
             race,
@@ -156,12 +157,57 @@ pub(super) fn convert_currency(args: &[String]) -> Result<(), String> {
                 amount,
                 quote_rate: rate,
             }),
+            stake_action: None,
             fee: Amount::from_atomic(fee),
             tax: Amount::ZERO,
             message: None,
         };
         intent.tax = calculate_signed_tax(&intent, &policy, race)?;
         wallet.0.sign_intent(intent)
+    })?;
+    submit_or_print_transaction(args, &transaction)
+}
+
+pub(super) fn stake(args: &[String]) -> Result<(), String> {
+    let operation = args
+        .first()
+        .ok_or("usage: wallet stake <delegate|undelegate|withdraw> ...")?;
+    let action = match operation.as_str() {
+        "delegate" | "undelegate" => {
+            let amount = parse_amount(option(args, "--amount").ok_or("missing --amount")?)?;
+            if operation == "delegate" {
+                StakeAction::Delegate { amount }
+            } else {
+                StakeAction::Undelegate { amount }
+            }
+        }
+        "withdraw" => StakeAction::Withdraw {
+            amount: parse_amount(option(args, "--amount").ok_or("missing --amount")?)?,
+        },
+        _ => return Err("stake action must be delegate, undelegate, or withdraw".into()),
+    };
+
+    let path = option(args, "--wallet").unwrap_or(DEFAULT_WALLET_PATH);
+    let rpc = option(args, "--rpc").unwrap_or(DEFAULT_RPC_ADDR);
+    let wallet = load_wallet(path)?;
+    let race = Race::from(wallet.address().race());
+    let nonce = account_nonce(rpc, &wallet)?;
+    if let Some(known_race) = race_lookup(rpc, &wallet.address())?
+        && known_race != race
+    {
+        return Err("wallet account is already assigned to another race".into());
+    }
+    let transaction = wallet.0.sign_intent(AccountIntent {
+        sender: wallet.address(),
+        race,
+        register_race: false,
+        nonce,
+        transfers: vec![],
+        conversion: None,
+        stake_action: Some(action),
+        fee: Amount::ZERO,
+        tax: Amount::ZERO,
+        message: None,
     })?;
     submit_or_print_transaction(args, &transaction)
 }
@@ -216,6 +262,7 @@ fn race_lookup(rpc: &str, address: &Address) -> Result<Option<novus::transaction
 }
 
 fn automatic_fee_transaction(
+    charge_novus_fee: bool,
     mut build: impl FnMut(u128) -> Result<Transaction, String>,
 ) -> Result<Transaction, String> {
     let mut fee = 0_u128;
@@ -227,7 +274,7 @@ fn automatic_fee_transaction(
                 .len(),
         )
         .map_err(|_| "transaction size overflow")?;
-        let required = size;
+        let required = if charge_novus_fee { size } else { 0 };
         if fee == required {
             return Ok(transaction);
         }
@@ -245,6 +292,21 @@ fn submit_or_print_transaction(args: &[String], transaction: &Transaction) -> Re
         return Err("wallet produced an invalid transaction authorization".into());
     }
     let bytes = canonical_bytes(transaction).map_err(|error| error.to_string())?;
+    if let Some(action) = transaction.intent.stake_action {
+        match action {
+            StakeAction::Delegate { amount } => println!(
+                "Stake action: delegate {} atomic units to the race pool",
+                amount.as_atomic()
+            ),
+            StakeAction::Undelegate { amount } => println!(
+                "Stake action: undelegate {} atomic units from the race pool",
+                amount.as_atomic()
+            ),
+            StakeAction::Withdraw { amount } => {
+                println!("Stake action: withdraw {} atomic units", amount.as_atomic())
+            }
+        }
+    }
     let tax_currency = transaction
         .intent
         .conversion
@@ -255,12 +317,13 @@ fn submit_or_print_transaction(args: &[String], transaction: &Transaction) -> Re
                 .transfers
                 .first()
                 .map(|transfer| transfer.currency)
-        })
-        .ok_or("transaction has no tax source currency")?;
-    println!(
-        "Tax: {} atomic units ({tax_currency:?})",
-        transaction.intent.tax.as_atomic()
-    );
+        });
+    if let Some(tax_currency) = tax_currency {
+        println!(
+            "Tax: {} atomic units ({tax_currency:?})",
+            transaction.intent.tax.as_atomic()
+        );
+    }
     if has_flag(args, "--offline") {
         println!("Transaction Hex: {}", hex::encode(&bytes));
         println!("Bytes: {}", bytes.len());

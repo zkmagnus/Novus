@@ -8,7 +8,7 @@ use crate::{
     blockchain::{Header, MAX_BLOCK_SIZE},
     consensus::{
         DIFFICULTY_ADJUSTMENT_WINDOW, ForkChoiceError, MEDIAN_TIME_PAST_WINDOW, Work, block_work,
-        expected_difficulty_for_height, unix_time_now, validate_timestamp, verify_pow,
+        expected_difficulty_for_height, unix_time_now, validate_timestamp,
     },
 };
 use common::Height;
@@ -108,10 +108,9 @@ pub fn verify_header_chain(
             ));
         }
 
-        verify_pow(&current.header, expected).map_err(|error| {
-            HeaderChainError::InvalidHeaderChain(ForkChoiceError::InvalidProofOfWork(error))
-        })?;
-
+        // Header-only sync cannot authenticate the miner's parent-state stake.
+        // PoW and trusted work are deferred until the matching block body is
+        // validated against the branch ledger state.
         let work = block_work(expected).ok_or(HeaderChainError::InvalidHeaderChain(
             ForkChoiceError::InvalidDifficulty,
         ))?;
@@ -268,10 +267,7 @@ pub fn verify_header_chain_extension(
             ));
         }
 
-        verify_pow(header, expected_difficulty).map_err(|error| {
-            HeaderChainError::InvalidHeaderChain(ForkChoiceError::InvalidProofOfWork(error))
-        })?;
-
+        // As above, this work is only a provisional header estimate.
         let work = block_work(expected_difficulty).ok_or(HeaderChainError::InvalidHeaderChain(
             ForkChoiceError::InvalidDifficulty,
         ))?;

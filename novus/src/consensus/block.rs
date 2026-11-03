@@ -18,6 +18,9 @@ pub trait ApplyBlockState {
 
     fn consensus_chain(&self) -> &Chain;
 
+    /// Validates PoW using state derived from the candidate block's parent.
+    fn validate_block_pow(&self, block: &Block) -> Result<(), ConsensusError>;
+
     fn commit_validated_block(&mut self, block: ValidatedBlock) -> Result<(), Self::Error>;
 }
 
@@ -30,6 +33,7 @@ where
     }
 
     let validated = validate_block_for_apply(&block, state.consensus_chain())?;
+    state.validate_block_pow(validated.block())?;
 
     state.commit_validated_block(validated)
 }
@@ -52,7 +56,7 @@ where
         return Err(ConsensusError::WrongGenesis.into());
     }
 
-    let validated = validate_for_apply(&block, state.consensus_chain(), true)?;
+    let validated = validate_for_apply(&block, state.consensus_chain())?;
 
     state.commit_validated_block(validated)
 }
@@ -77,25 +81,24 @@ impl ValidatedBlock {
     }
 }
 
+/// Validates block structure, linkage, timestamps, declared network difficulty,
+/// and emission shape. State-dependent PoW is checked by [`apply_block`] after
+/// the parent ledger state is available.
 pub fn validate_block_for_apply(
     block: &Block,
     chain: &Chain,
 ) -> Result<ValidatedBlock, ConsensusError> {
-    validate_for_apply(block, chain, true)
+    validate_for_apply(block, chain)
 }
 
 pub fn validate_candidate_for_apply(
     block: &Block,
     chain: &Chain,
 ) -> Result<ValidatedBlock, ConsensusError> {
-    validate_for_apply(block, chain, false)
+    validate_for_apply(block, chain)
 }
 
-fn validate_for_apply(
-    block: &Block,
-    chain: &Chain,
-    enforce_pow: bool,
-) -> Result<ValidatedBlock, ConsensusError> {
+fn validate_for_apply(block: &Block, chain: &Chain) -> Result<ValidatedBlock, ConsensusError> {
     block.validate_structure()?;
 
     chain
@@ -124,9 +127,7 @@ fn validate_for_apply(
 
         let expected_difficulty = expected_difficulty(chain, block.height())?;
 
-        if enforce_pow {
-            Consensus::validate_pow_at_target_bits(block, expected_difficulty)?;
-        } else if block.target_bits() != expected_difficulty {
+        if block.target_bits() != expected_difficulty {
             return Err(ConsensusError::UnexpectedDifficulty);
         }
     }

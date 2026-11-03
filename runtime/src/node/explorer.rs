@@ -27,7 +27,25 @@ pub(super) fn account_response(
         "balance": account.balance().as_atomic(),
         "balances": account.balances.iter().map(|(currency, amount)| (format!("{currency:?}").to_lowercase(), amount.as_atomic())).collect::<std::collections::BTreeMap<_, _>>(),
         "nonce": account.nonce,
+        "stake": stake_summary(ledger, address),
     }))
+}
+
+fn stake_summary(ledger: &Ledger, address: Address) -> serde_json::Value {
+    let race = novus::transaction::Race::from(address.race());
+    let active_stake = ledger.state().staking.active_by_delegator(race, address);
+    let race_pool_stake = ledger
+        .state()
+        .staking
+        .active_for_race(race)
+        .unwrap_or_default();
+    serde_json::json!({
+        "epoch": ledger.state().staking.current_epoch(),
+        "locked_atomic": ledger.state().staking.locked_by(race, address).as_atomic(),
+        "withdrawable_atomic": ledger.state().staking.withdrawable_by(race, address).as_atomic(),
+        "active_stake_atomic": active_stake.as_atomic(),
+        "race_pool_active_stake_atomic": race_pool_stake.as_atomic(),
+    })
 }
 
 pub(super) fn balance_response(
@@ -165,6 +183,32 @@ pub(super) fn address_transaction_activity(
     _tax_rate: u8,
     exchange_rate: u128,
 ) -> Result<Option<serde_json::Value>, String> {
+    if let Some(action) = transaction.intent.stake_action {
+        if transaction.intent.sender != address {
+            return Ok(None);
+        }
+        let (kind, direction, amount) = match action {
+            novus::transaction::StakeAction::Delegate { amount } => {
+                ("stake_delegate", "delegate", amount)
+            }
+            novus::transaction::StakeAction::Undelegate { amount } => {
+                ("stake_undelegate", "undelegate", amount)
+            }
+            novus::transaction::StakeAction::Withdraw { amount } => {
+                ("stake_withdraw", "withdraw", amount)
+            }
+        };
+        return Ok(Some(serde_json::json!({
+            "height": block.height().0,
+            "block_hash": hex::encode(block.hash().map_err(|error| error.to_string())?.0),
+            "hash": hex::encode(transaction.id().map_err(|error| error.to_string())?),
+            "type": kind,
+            "direction": direction,
+            "amount": amount.as_atomic(),
+            "currency": format!("{:?}", novus::transaction::Currency::for_race_reward(transaction.intent.race)).to_lowercase(),
+            "size_bytes": canonical_bytes(transaction).map_err(|error| error.to_string())?.len(),
+        })));
+    }
     if let Some(conversion) = transaction.intent.conversion {
         if transaction.intent.sender != address {
             return Ok(None);
@@ -201,7 +245,7 @@ pub(super) fn address_transaction_activity(
             "tax": transaction.intent.tax.as_atomic(),
             "tax_currency": format!("{:?}", conversion.from).to_lowercase(),
             "fee": transaction.intent.fee.as_atomic(),
-            "fee_currency": format!("{:?}", transaction.intent.fee_currency()).to_lowercase(),
+            "fee_currency": (!transaction.intent.fee.is_zero()).then_some("novus"),
             "size_bytes": canonical_bytes(transaction).map_err(|error| error.to_string())?.len(),
         })));
     }
@@ -248,7 +292,7 @@ pub(super) fn address_transaction_activity(
         "tax": transaction.intent.tax.as_atomic(),
         "tax_currency": transaction.intent.transfers.first().map(|transfer| format!("{:?}", transfer.currency).to_lowercase()),
         "fee": transaction.intent.fee.as_atomic(),
-        "fee_currency": format!("{:?}", transaction.intent.fee_currency()).to_lowercase(),
+        "fee_currency": (!transaction.intent.fee.is_zero()).then_some("novus"),
         "message": transaction.intent.message.as_deref(),
         "size_bytes": canonical_bytes(transaction).map_err(|error| error.to_string())?.len(),
     })))
@@ -337,6 +381,20 @@ pub(super) fn spend_transaction_response(
             "rate": rate,
         })
     });
+    let stake_action = intent.stake_action.map(|action| match action {
+        novus::transaction::StakeAction::Delegate { amount } => serde_json::json!({
+            "action": "delegate",
+            "amount": amount.as_atomic(),
+        }),
+        novus::transaction::StakeAction::Undelegate { amount } => serde_json::json!({
+            "action": "undelegate",
+            "amount": amount.as_atomic(),
+        }),
+        novus::transaction::StakeAction::Withdraw { amount } => serde_json::json!({
+            "action": "withdraw",
+            "amount": amount.as_atomic(),
+        }),
+    });
     serde_json::json!({
         "type": transaction_kind(transaction),
         "protocol_tax": transaction_tax_json(transaction),
@@ -352,8 +410,9 @@ pub(super) fn spend_transaction_response(
             "amount": transfer.amount.as_atomic(),
         })).collect::<Vec<_>>(),
         "conversion": conversion,
+        "stake_action": stake_action,
         "fee": intent.fee.as_atomic(),
-        "fee_currency": format!("{:?}", intent.fee_currency()).to_lowercase(),
+        "fee_currency": (!intent.fee.is_zero()).then_some("novus"),
     })
 }
 
@@ -370,7 +429,13 @@ pub(super) fn checked_output_sum(
 }
 
 pub(super) fn transaction_kind(transaction: &Transaction) -> &'static str {
-    if transaction.intent.conversion.is_some() {
+    if transaction.intent.stake_action.is_some() {
+        match transaction.intent.stake_action.expect("checked as some") {
+            novus::transaction::StakeAction::Delegate { .. } => "stake_delegate",
+            novus::transaction::StakeAction::Undelegate { .. } => "stake_undelegate",
+            novus::transaction::StakeAction::Withdraw { .. } => "stake_withdraw",
+        }
+    } else if transaction.intent.conversion.is_some() {
         "conversion"
     } else {
         "transfer"
@@ -403,20 +468,7 @@ fn transaction_tax_json(transaction: &Transaction) -> std::collections::BTreeMap
 }
 
 fn tax_vault_credit_json(transaction: &Transaction) -> std::collections::BTreeMap<String, u128> {
-    let mut credits = transaction_tax_json(transaction);
-    let fee_currency = transaction.intent.fee_currency();
-    if fee_currency == novus::transaction::Currency::Novus {
-        return credits;
-    }
-    let key = format!("{fee_currency:?}").to_lowercase();
-    let amount = credits
-        .get(&key)
-        .copied()
-        .unwrap_or_default()
-        .saturating_add(transaction.intent.fee.as_atomic());
-    if amount > 0 {
-        credits.insert(key, amount);
-    }
+    let credits = transaction_tax_json(transaction);
     credits
 }
 
@@ -492,7 +544,7 @@ pub(super) fn status_response(
         },
         "race_block_rewards": novus.race_rewards.iter().map(|(currency, amount)| (format!("{currency:?}").to_lowercase(), amount.as_atomic())).collect::<std::collections::BTreeMap<_, _>>(),
         "race_tax_modifier_percent_points": ledger.state().chip_war.tax_rates.iter().map(|(race, rate)| (format!("{race:?}").to_lowercase(), rate)).collect::<std::collections::BTreeMap<_, _>>(),
-        "tax_vault": ledger.state().tax_vault.balances().iter().map(|(currency, amount)| (format!("{currency:?}").to_lowercase(), amount.as_atomic())).collect::<std::collections::BTreeMap<_, _>>(),
+        "tax_vault": ledger.state().tax_vault.balances().iter().map(|((race, currency), amount)| (format!("{race:?}_{currency:?}").to_lowercase(), amount.as_atomic())).collect::<std::collections::BTreeMap<_, _>>(),
         "exchange_vault": ledger.state().exchange_vault.balances().iter().map(|(currency, amount)| (format!("{currency:?}").to_lowercase(), amount.as_atomic())).collect::<std::collections::BTreeMap<_, _>>(),
         "chip_war": {
             "epoch_seconds": novus::ledger::CHIP_WAR_EPOCH_SECONDS,
@@ -524,19 +576,23 @@ fn currency_supply(
             supply.insert(currency, total);
         }
     }
-    for vault in [
-        ledger.state().tax_vault.balances(),
-        ledger.state().exchange_vault.balances(),
-    ] {
-        for (&currency, &amount) in vault {
-            let total = supply
-                .get(&currency)
-                .copied()
-                .unwrap_or(Amount::ZERO)
-                .checked_add(amount)
-                .ok_or("currency supply overflow")?;
-            supply.insert(currency, total);
-        }
+    for (&(_, currency), &amount) in ledger.state().tax_vault.balances() {
+        let total = supply
+            .get(&currency)
+            .copied()
+            .unwrap_or(Amount::ZERO)
+            .checked_add(amount)
+            .ok_or("currency supply overflow")?;
+        supply.insert(currency, total);
+    }
+    for (&currency, &amount) in ledger.state().exchange_vault.balances() {
+        let total = supply
+            .get(&currency)
+            .copied()
+            .unwrap_or(Amount::ZERO)
+            .checked_add(amount)
+            .ok_or("currency supply overflow")?;
+        supply.insert(currency, total);
     }
     Ok(supply)
 }

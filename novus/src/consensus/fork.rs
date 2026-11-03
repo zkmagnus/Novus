@@ -59,6 +59,23 @@ impl Work {
 
         if carry > 0 { Self::MAX } else { Self(result) }
     }
+
+    pub fn checked_sub(self, rhs: Self) -> Option<Self> {
+        let mut result = [0_u64; 8];
+        let mut borrow = 0_u128;
+        for index in (0..result.len()).rev() {
+            let left = u128::from(self.0[index]);
+            let right = u128::from(rhs.0[index]) + borrow;
+            if left >= right {
+                result[index] = (left - right) as u64;
+                borrow = 0;
+            } else {
+                result[index] = ((1_u128 << 64) + left - right) as u64;
+                borrow = 1;
+            }
+        }
+        (borrow == 0).then_some(Self(result))
+    }
 }
 
 impl Add for Work {
@@ -96,6 +113,25 @@ impl ForkChoice {
     }
 
     pub fn insert_block(&mut self, block: Block) -> Result<BlockHash, ForkChoiceError> {
+        self.insert_block_with_work(block, None)
+    }
+
+    /// Inserts a block whose complete body and state-derived PoW have already
+    /// been validated by the caller. `effective_work` must be computed from
+    /// the parent-state stake-adjusted target.
+    pub fn insert_validated_block(
+        &mut self,
+        block: Block,
+        effective_work: Work,
+    ) -> Result<BlockHash, ForkChoiceError> {
+        self.insert_block_with_work(block, Some(effective_work))
+    }
+
+    fn insert_block_with_work(
+        &mut self,
+        block: Block,
+        validated_work: Option<Work>,
+    ) -> Result<BlockHash, ForkChoiceError> {
         block
             .validate_structure()
             .map_err(ForkChoiceError::InvalidBlock)?;
@@ -156,12 +192,16 @@ impl ForkChoice {
             if block.target_bits() != expected_difficulty {
                 return Err(ForkChoiceError::InvalidDifficulty);
             }
-            Consensus::validate_pow_at_target_bits(&block, expected_difficulty)
-                .map_err(ForkChoiceError::InvalidProofOfWork)?;
+            if validated_work.is_none() {
+                Consensus::validate_pow_at_target_bits(&block, expected_difficulty)
+                    .map_err(ForkChoiceError::InvalidProofOfWork)?;
+            }
         }
 
         let work = if block.is_genesis() {
             Work::ZERO
+        } else if let Some(work) = validated_work {
+            work
         } else {
             block_work(expected_difficulty).ok_or(ForkChoiceError::InvalidDifficulty)?
         };

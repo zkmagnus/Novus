@@ -48,6 +48,9 @@ node wallet balance [--wallet PATH] [--rpc ADDRESS]
 node wallet history [--limit 1..=250] [--before CURSOR]
 node wallet send --to ADDRESS --amount AMOUNT [--currency cp|dlt|dsc|gold|novus] [--message TEXT] [--rpc ADDRESS] [--wallet PATH] [--offline]
 node wallet convert --amount AMOUNT --currency CURRENCY [--to CURRENCY] [--rpc ADDRESS] [--wallet PATH] [--offline]
+node wallet stake delegate --amount AMOUNT [OPTIONS]
+node wallet stake undelegate --amount AMOUNT [OPTIONS]
+node wallet stake withdraw --amount AMOUNT [OPTIONS]
 node wallet version
 
 Convert examples:
@@ -55,6 +58,6 @@ Convert examples:
   node wallet convert --amount 1000 --currency gold --to novus  (1,000 Gold = 1 Novus)
   node wallet convert --amount 1 --currency gold --to cp|dlt|dsc
 
-Amounts use coin units with up to 6 decimal places. New wallets default to the node's race. Gold transfers are restricted to accounts of the sender's race; Novus transfers work across races. Transfer relay fees are in Gold except Novus transfers, which pay in Novus and are credited directly to the block miner. Conversion relay fees use the source currency. Chip War tax adjustments for the sender race apply to all taxable transactions. Taxes use the source currency; Novus transfers have 0% tax. Novus cannot be converted back to Gold. Wallet transactions use sequential nonces and BIP340 Schnorr signatures."#
+Amounts use coin units with up to 6 decimal places. New wallets default to the node's race. Gold transfers are restricted to accounts of the sender's race; Novus transfers work across races and pay a size-based Novus fee to the including miner. Other transactions have no relay fee. Chip War tax adjustments for the sender race apply to all taxable transactions. Taxes use the source currency; Novus transfers have 0% tax. Novus cannot be converted back to Gold. Stake is delegated to the wallet's race pool and supports all miners in that race. Delegated stake activates after one completed 3-day War epoch; undelegated stake becomes withdrawable after one completed epoch. Wallet transactions use sequential nonces and BIP340 Schnorr signatures."#
     );
 }

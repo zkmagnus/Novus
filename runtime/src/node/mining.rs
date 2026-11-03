@@ -39,12 +39,24 @@ pub(super) fn mine_block_database(
         .validate_structure()
         .map_err(|error| format!("mining candidate is invalid: {error}"))?;
     let height = block.height();
-    let found = crate::miner::mine_range(
+    let race = novus::transaction::Race::from(miner.race());
+    let active_stake = ledger
+        .state()
+        .staking
+        .active_for_race(race)
+        .ok_or("active stake total overflow")?;
+    let network_target = novus::consensus::PoWTarget::from_compact(block.target_bits())
+        .ok_or("network target is invalid")?;
+    let pow_limit = novus::consensus::stake_target_limit();
+    let target = novus::consensus::effective_target(network_target, active_stake, pow_limit)
+        .ok_or("stake-adjusted mining target is invalid")?;
+    let found = crate::miner::mine_range_at_target(
         &mut block,
         crate::miner::MiningRange {
             start_nonce,
             attempts,
         },
+        target,
     )
     .map_err(|error| error.to_string())?;
     if found.is_none() {

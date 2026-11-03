@@ -437,6 +437,7 @@ mod p3e_replay_tests {
                 Amount::from_atomic(1),
             )],
             conversion: None,
+            stake_action: None,
             fee: Amount::ZERO,
             tax: Amount::ZERO,
             message: None,

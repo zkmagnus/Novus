@@ -11,10 +11,10 @@ pub const CHIP_WAR_EPOCH_BLOCKS: u64 = CHIP_WAR_EPOCH_SECONDS / TARGET_BLOCK_TIM
 /// Chip War tax modifier starts at the base rates, so its initial offset is zero.
 pub const BASE_RACE_TAX_MODIFIER_PERCENT: u8 = 0;
 pub const MIN_RACE_TAX_MODIFIER_PERCENT: u8 = 0;
-/// A +19 point modifier brings the 1% base transfer tax to the 20% effective cap.
-pub const MAX_RACE_TAX_MODIFIER_PERCENT: u8 = 19;
-pub const MAX_EFFECTIVE_TAX_PERCENT: u8 = 20;
-pub const RACE_TAX_LOSS_INCREASE_PERCENT: u8 = 2;
+/// Shared cumulative modifier cap: +6 over the 1% base rate means 7% total.
+pub const MAX_RACE_TAX_MODIFIER_PERCENT: u8 = 6;
+pub const MAX_EFFECTIVE_TAX_PERCENT: u8 = 7;
+pub const RACE_TAX_LOSS_INCREASE_PERCENT: u8 = 1;
 pub const RACE_TAX_FAILURE_INCREASE_PERCENT: u8 = 1;
 pub const RACE_TAX_WIN_DECREASE_PERCENT: u8 = 1;
 pub const EXCHANGE_RATE_STEP_PERCENT: i8 = 5;

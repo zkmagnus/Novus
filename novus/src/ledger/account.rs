@@ -156,7 +156,12 @@ impl AccountState {
         register_race: Option<crate::transaction::Race>,
     ) -> Result<AccountRollback, AccountError> {
         let mut debits = BTreeMap::<Currency, Amount>::new();
-        debits.insert(fee_currency, fee);
+        let fee_currency = if fee.is_zero() { fee_currency } else { Currency::Novus };
+        let current = debits.get(&fee_currency).copied().unwrap_or(Amount::ZERO);
+        debits.insert(
+            fee_currency,
+            current.checked_add(fee).ok_or(AccountError::BalanceOverflow)?,
+        );
         for transfer in transfers {
             let current = debits
                 .get(&transfer.currency)
@@ -331,10 +336,10 @@ impl AccountState {
                     .ok_or(AccountError::BalanceOverflow)?,
             );
         }
-        let current = debits.get(&fee_currency).copied().unwrap_or(Amount::ZERO);
+        let current_fee = debits.get(&fee_currency).copied().unwrap_or(Amount::ZERO);
         debits.insert(
             fee_currency,
-            current
+            current_fee
                 .checked_add(fee)
                 .ok_or(AccountError::BalanceOverflow)?,
         );

@@ -7,6 +7,7 @@ pub mod applied;
 pub mod chip_war;
 pub mod exchange;
 pub mod ledger;
+pub mod staking;
 mod state;
 pub mod tax;
 
@@ -15,5 +16,6 @@ pub use account::{Account, AccountError, AccountRollback, AccountState};
 pub use chip_war::*;
 pub use exchange::*;
 pub use ledger::*;
+pub use staking::{PendingStakeChange, StakeChangeKind, StakeState};
 pub use state::*;
 pub use tax::*;

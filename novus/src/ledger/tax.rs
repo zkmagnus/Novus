@@ -8,28 +8,29 @@ use crate::transaction::{Amount, Currency, Race};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct TaxVault {
-    balances: BTreeMap<Currency, Amount>,
+    balances: BTreeMap<(Race, Currency), Amount>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct TaxVaultRollback {
-    before: BTreeMap<Currency, Option<Amount>>,
+    before: BTreeMap<(Race, Currency), Option<Amount>>,
 }
 
 impl TaxVault {
-    pub fn balance(&self, currency: Currency) -> Amount {
+    pub fn balance(&self, race: Race, currency: Currency) -> Amount {
         self.balances
-            .get(&currency)
+            .get(&(race, currency))
             .copied()
             .unwrap_or(Amount::ZERO)
     }
 
-    pub fn balances(&self) -> &BTreeMap<Currency, Amount> {
+    pub fn balances(&self) -> &BTreeMap<(Race, Currency), Amount> {
         &self.balances
     }
 
     pub(crate) fn credit(
         &mut self,
+        race: Race,
         taxes: &BTreeMap<Currency, Amount>,
     ) -> Option<TaxVaultRollback> {
         let mut staged = self.clone();
@@ -39,17 +40,17 @@ impl TaxVault {
                 continue;
             }
             before
-                .entry(currency)
-                .or_insert_with(|| self.balances.get(&currency).copied());
-            let total = staged.balance(currency).checked_add(amount)?;
-            staged.balances.insert(currency, total);
+                .entry((race, currency))
+                .or_insert_with(|| self.balances.get(&(race, currency)).copied());
+            let total = staged.balance(race, currency).checked_add(amount)?;
+            staged.balances.insert((race, currency), total);
         }
         *self = staged;
         Some(TaxVaultRollback { before })
     }
 
-    /// Race currencies stay in their nation's vault; universal currencies are
-    /// claimable by any race's block miner.
+    /// Taxes are reserved for miners in the race that generated them, even if
+    /// the taxed currency itself (such as Gold) is globally transferable.
     pub(crate) fn claim_for_race(
         &mut self,
         race: Race,
@@ -57,15 +58,20 @@ impl TaxVault {
         let claimable = self
             .balances
             .iter()
-            .filter(|(currency, _)| currency.required_race().is_none_or(|owner| owner == race))
-            .map(|(&currency, &amount)| (currency, amount))
+            .filter(|((owner, _), _)| *owner == race)
+            .map(|(&(_, currency), &amount)| (currency, amount))
             .collect::<BTreeMap<_, _>>();
         let before = claimable
             .keys()
-            .map(|&currency| (currency, self.balances.get(&currency).copied()))
+            .map(|&currency| {
+                (
+                    (race, currency),
+                    self.balances.get(&(race, currency)).copied(),
+                )
+            })
             .collect();
         for currency in claimable.keys() {
-            self.balances.remove(currency);
+            self.balances.remove(&(race, *currency));
         }
         (claimable, TaxVaultRollback { before })
     }
@@ -81,5 +87,47 @@ impl TaxVault {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gold_tax_is_claimable_only_by_a_miner_from_its_origin_race() {
+        let mut vault = TaxVault::default();
+        let taxes = BTreeMap::from([(Currency::Gold, Amount::from_atomic(75))]);
+        vault.credit(Race::Bellato, &taxes).expect("tax credit");
+
+        let (accretia_claim, rollback) = vault.claim_for_race(Race::Accretia);
+        assert!(accretia_claim.is_empty());
+        vault.rollback(rollback);
+        assert_eq!(
+            vault.balance(Race::Bellato, Currency::Gold),
+            Amount::from_atomic(75)
+        );
+
+        let (bellato_claim, _) = vault.claim_for_race(Race::Bellato);
+        assert_eq!(
+            bellato_claim.get(&Currency::Gold),
+            Some(&Amount::from_atomic(75))
+        );
+        assert_eq!(vault.balance(Race::Bellato, Currency::Gold), Amount::ZERO);
+    }
+
+    #[test]
+    fn race_currency_tax_stays_in_the_origin_race_vault() {
+        let mut vault = TaxVault::default();
+        let taxes = BTreeMap::from([(Currency::Dalant, Amount::from_atomic(23))]);
+        vault.credit(Race::Bellato, &taxes).expect("tax credit");
+
+        let (accretia_claim, _) = vault.claim_for_race(Race::Accretia);
+        assert!(accretia_claim.is_empty());
+        let (bellato_claim, _) = vault.claim_for_race(Race::Bellato);
+        assert_eq!(
+            bellato_claim.get(&Currency::Dalant),
+            Some(&Amount::from_atomic(23))
+        );
     }
 }

@@ -67,6 +67,7 @@ impl LedgerState {
             exchange_vault: None,
             chip_war: None,
             global_currency: None,
+            staking: None,
         })
     }
 
@@ -82,6 +83,9 @@ impl LedgerState {
         transaction: &ValidatedTransaction,
         miner: Option<Address>,
     ) -> Result<StateRollbackJournal, StateError> {
+        if let Some(action) = transaction.intent.stake_action {
+            return self.apply_stake_action(transaction, action);
+        }
         let register_race = transaction
             .intent
             .register_race
@@ -242,35 +246,8 @@ impl LedgerState {
                 return Err(error.into());
             }
         };
-        let fee_currency = transaction.intent.fee_currency();
-        if fee_currency == crate::transaction::Currency::Novus
-            && let Some(miner) = miner
-            && let Err(error) = self.accounts.credit_currency_with_journal(
-                miner,
-                crate::transaction::Currency::Novus,
-                transaction.intent.fee,
-                &mut accounts,
-            )
-        {
-            self.accounts.rollback(accounts);
-            if let Some(journal) = exchange_vault_journal.take() {
-                self.exchange_vault.rollback(journal);
-            }
-            if let Some(journal) = global_currency_journal.take() {
-                self.global_currency = journal.previous;
-            }
-            return Err(error.into());
-        }
-        let mut vault_credit = transaction.taxes.clone();
-        let fee_in_vault = fee_currency != crate::transaction::Currency::Novus;
-        if fee_in_vault {
-            let current_fee_currency_tax = vault_credit
-                .get(&fee_currency)
-                .copied()
-                .unwrap_or(Amount::ZERO);
-            let Some(total_fee_currency_tax) =
-                current_fee_currency_tax.checked_add(transaction.intent.fee)
-            else {
+        if !transaction.intent.fee.is_zero() {
+            let Some(miner) = miner else {
                 self.accounts.rollback(accounts);
                 if let Some(journal) = exchange_vault_journal.take() {
                     self.exchange_vault.rollback(journal);
@@ -278,13 +255,29 @@ impl LedgerState {
                 if let Some(journal) = global_currency_journal.take() {
                     self.global_currency = journal.previous;
                 }
-                return Err(StateError::AmountOverflow);
+                return Err(StateError::InvalidTransaction);
             };
-            if !total_fee_currency_tax.is_zero() {
-                vault_credit.insert(fee_currency, total_fee_currency_tax);
+            if let Err(error) = self.accounts.credit_currency_with_journal(
+                miner,
+                crate::transaction::Currency::Novus,
+                transaction.intent.fee,
+                &mut accounts,
+            ) {
+                self.accounts.rollback(accounts);
+                if let Some(journal) = exchange_vault_journal.take() {
+                    self.exchange_vault.rollback(journal);
+                }
+                if let Some(journal) = global_currency_journal.take() {
+                    self.global_currency = journal.previous;
+                }
+                return Err(error.into());
             }
         }
-        let tax_vault = match self.tax_vault.credit(&vault_credit) {
+        let vault_credit = transaction.taxes.clone();
+        let tax_vault = match self
+            .tax_vault
+            .credit(transaction.intent.race, &vault_credit)
+        {
             Some(journal) => journal,
             None => {
                 self.accounts.rollback(accounts);
@@ -309,6 +302,78 @@ impl LedgerState {
             exchange_vault: exchange_vault_journal,
             chip_war: None,
             global_currency: global_currency_journal,
+            staking: None,
+        })
+    }
+
+    fn apply_stake_action(
+        &mut self,
+        transaction: &ValidatedTransaction,
+        action: crate::transaction::StakeAction,
+    ) -> Result<StateRollbackJournal, StateError> {
+        use crate::transaction::{Currency, StakeAction};
+
+        let sender = transaction.intent.sender;
+        let race = transaction.intent.race;
+        let currency = Currency::for_race_reward(race);
+        let accounts = self.accounts.checkpoint([sender]);
+        let previous_staking = self.staking.clone();
+
+        let result = (|| {
+            match action {
+                StakeAction::Delegate { amount } => {
+                    self.accounts.debit_currency(
+                        sender,
+                        currency,
+                        amount,
+                        transaction.intent.nonce,
+                    )?;
+                    self.staking
+                        .schedule_delegate(race, sender, amount)
+                        .ok_or(crate::ledger::AccountError::BalanceOverflow)?;
+                }
+                StakeAction::Undelegate { amount } => {
+                    self.accounts.debit_currency(
+                        sender,
+                        currency,
+                        Amount::ZERO,
+                        transaction.intent.nonce,
+                    )?;
+                    self.staking
+                        .schedule_undelegate(race, sender, amount)
+                        .ok_or(crate::ledger::AccountError::InsufficientBalance)?;
+                }
+                StakeAction::Withdraw { amount } => {
+                    self.accounts.debit_currency(
+                        sender,
+                        currency,
+                        Amount::ZERO,
+                        transaction.intent.nonce,
+                    )?;
+                    self.staking
+                        .withdraw(race, sender, amount)
+                        .ok_or(crate::ledger::AccountError::InsufficientBalance)?;
+                    self.accounts.credit_currency(sender, currency, amount)?;
+                }
+            }
+            Ok::<(), crate::ledger::AccountError>(())
+        })();
+
+        if let Err(error) = result {
+            self.accounts.rollback(accounts);
+            self.staking = previous_staking;
+            return Err(error.into());
+        }
+
+        Ok(StateRollbackJournal {
+            account: Some(AccountRollbackJournal {
+                accounts,
+                mined: Amount::ZERO,
+                burned: Amount::ZERO,
+                race_reward: None,
+            }),
+            staking: Some(previous_staking),
+            ..StateRollbackJournal::default()
         })
     }
 
@@ -317,12 +382,23 @@ impl LedgerState {
         height: u64,
         miner_race: crate::transaction::Race,
     ) -> Result<StateRollbackJournal, StateError> {
+        let previous_staking = self.staking.clone();
         let journal = self
             .chip_war
             .record_block(height, miner_race)
             .ok_or(StateError::AmountOverflow)?;
+        if self
+            .staking
+            .advance_epoch(self.chip_war.completed_epochs)
+            .is_none()
+        {
+            self.chip_war.rollback(journal);
+            self.staking = previous_staking;
+            return Err(StateError::AmountOverflow);
+        }
         Ok(StateRollbackJournal {
             chip_war: Some(journal),
+            staking: Some(previous_staking),
             ..StateRollbackJournal::default()
         })
     }
@@ -345,6 +421,9 @@ impl LedgerState {
         }
         if let Some(global_currency) = journal.global_currency {
             self.global_currency = global_currency.previous;
+        }
+        if let Some(staking) = journal.staking {
+            self.staking = staking;
         }
         Ok(())
     }

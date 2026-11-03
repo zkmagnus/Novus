@@ -8,5 +8,5 @@ pub use authorization::{AuthorizationCommitment, Transaction, TransactionAuthori
 pub use spend::{
     AccountIntent, Amount, AtomicAmount, Currency, CurrencyConversion, DECIMALS, GOLD_PER_NOVUS,
     MAX_SPEND_MESSAGE_BYTES, RACE_CURRENCY_PER_GOLD, Race, Transfer, conversion_output_amount,
-    exchange_output_amount,
+    exchange_output_amount, StakeAction,
 };

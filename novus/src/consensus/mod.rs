@@ -3,6 +3,7 @@ mod fork;
 mod header;
 mod policy;
 mod pow;
+mod staking;
 mod target;
 mod transaction;
 
@@ -12,6 +13,7 @@ pub use fork::*;
 pub use header::*;
 pub use policy::*;
 pub use pow::*;
+pub use staking::*;
 pub use transaction::*;
 
 pub use crate::transaction::{Amount, AtomicAmount, DECIMALS};
