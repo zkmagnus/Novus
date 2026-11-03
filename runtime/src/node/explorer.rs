@@ -647,7 +647,7 @@ pub(super) fn block_response(ledger: &Ledger, block: &Block) -> Result<serde_jso
             }))
         })
         .collect::<Result<Vec<_>, String>>()?;
-    let hash = transaction_details
+    let transaction_hashes = transaction_details
         .iter()
         .filter_map(|transaction| transaction.get("hash").cloned())
         .collect::<Vec<_>>();
@@ -659,7 +659,7 @@ pub(super) fn block_response(ledger: &Ledger, block: &Block) -> Result<serde_jso
         "block_size": block.block_size(),
         "nonce": block.header.nonce.0,
         "transactions": block.transaction_count(),
-        "hash": hash,
+        "transaction_hashes": transaction_hashes,
         "transaction_details": transaction_details,
         "miner": novus::crypto::address_to_string(&block.miner_address(), block.miner_address().race().prefix()),
         "block_reward": block_reward,
