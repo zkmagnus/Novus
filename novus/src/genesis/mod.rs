@@ -164,7 +164,7 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
         exchange_rate_policy: "chip-war-winner-lower-loser-raise-failure-unchanged-clamp-base-10000-v2",
         exchange_rounding_policy: "rational-floor-to-smallest-unit-v1",
         chip_war_outcome_policy: "unique-scores-high-wins-low-loses-middle-failure-any-tie-all-failure-v1",
-        race_tax_application_policy: "uniform-base1-percent-on-all-taxable-types;loss-plus1-failure-plus1-shared-cumulative-modifier-cap6;win-minus1-floor-zero;effective-tax-cap7;novus-transfer-exempt-v8",
+        race_tax_application_policy: "uniform-base1-percent-on-all-taxable-types;loss-plus1-failure-plus1-shared-cumulative-modifier-cap3;win-minus1-floor-zero;effective-tax-cap4;novus-transfer-exempt-v8",
         block_reward_currency_policy: "miner-race-native-currency-v1",
         fee_tax_vault_policy: "all-protocol-taxes-keyed-by-origin-race-and-currency;only-origin-race-miners-claim-tax-vault;novus-transfer-fee-direct-to-including-block-miner-any-race;novus-tax-exempt-v3",
         gold_transfer_policy: "gold-transfer-sender-race-only;novus-transfer-global-v1",
