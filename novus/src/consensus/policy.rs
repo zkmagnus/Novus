@@ -1,24 +1,17 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{error::Error as StdError, fmt};
 
-use crate::{
-    blockchain::Block,
-    consensus::{PoWTarget, Work, block_work},
-    transaction::Amount,
-};
+use crate::{blockchain::Block, consensus::PoWTarget, transaction::Amount};
 use crypto::{Address, Hash, HashDomain, canonical_bytes, domain, hash_bytes};
 
 pub const TARGET_BLOCK_TIME_SECONDS: u64 = 30;
 pub const FINALITY_DEPTH_BLOCKS: u64 = 10_080;
-/// Number of solved blocks used by the linear weighted moving average.
-pub const DIFFICULTY_ADJUSTMENT_WINDOW: u64 = 120;
-pub const DIFFICULTY_TARGET_TIMESPAN_SECONDS: u64 =
-    TARGET_BLOCK_TIME_SECONDS * DIFFICULTY_ADJUSTMENT_WINDOW;
-/// Maximum solve time admitted for one LWMA sample, in target-block intervals.
-pub const DIFFICULTY_TIMESPAN_CLAMP_FACTOR: u64 = 6;
+/// ASERT half-life. The first trial uses one hour for a 30-second target block.
+pub const DIFFICULTY_ASERT_HALF_LIFE_SECONDS: u64 = 60 * 60;
 /// Network difficulty cannot exceed 16 times the starting difficulty.
 pub const MAX_DIFFICULTY_MULTIPLIER: u32 = 16;
-pub const DIFFICULTY_ALGORITHM: &str = "lwma-120-blocks-retarget-every-block-capped-at-16x-start";
+pub const DIFFICULTY_ALGORITHM: &str =
+    "asert-half-life-3600-seconds-anchor-height-1-capped-at-16x-start";
 pub const MEDIAN_TIME_PAST_WINDOW: usize = 11;
 pub const MAX_FUTURE_TIMESTAMP_DRIFT_SECONDS: u64 = 2 * 60 * 60;
 
@@ -76,85 +69,95 @@ pub fn minimum_difficulty_target_bits() -> Option<u32> {
     Some(floor.to_compact())
 }
 
-fn work_as_u64(work: Work) -> Option<u64> {
-    let limbs = work.to_be_limbs();
-    limbs[..7].iter().all(|limb| *limb == 0).then_some(limbs[7])
+/// Computes the next target using ASERT, anchored at the first non-genesis
+/// block. Integer fixed-point arithmetic keeps the result deterministic.
+pub fn next_asert_difficulty(
+    anchor_timestamp: u64,
+    parent_timestamp: u64,
+    parent_height: u64,
+) -> Option<u32> {
+    const FRACTIONAL_BITS: i128 = 1 << 16;
+    const ASERT_COEFFICIENT_1: u128 = 195_766_423_245_049;
+    const ASERT_COEFFICIENT_2: u128 = 971_821_376;
+    const ASERT_COEFFICIENT_3: u128 = 5_127;
+
+    // Parent height 1 is the fixed anchor. The candidate block is one
+    // expected interval beyond the parent, hence parent_height - 1 + 1.
+    let expected_intervals = parent_height;
+    let time_delta = i128::from(parent_timestamp) - i128::from(anchor_timestamp);
+    let schedule_delta =
+        i128::from(TARGET_BLOCK_TIME_SECONDS).checked_mul(i128::from(expected_intervals))?;
+    let exponent = time_delta
+        .checked_sub(schedule_delta)?
+        .checked_mul(FRACTIONAL_BITS)?
+        / i128::from(DIFFICULTY_ASERT_HALF_LIFE_SECONDS);
+
+    // The allowed target range is only 1/16 .. 1 of the initial target.
+    // Saturate outside that range before evaluating the polynomial.
+    if exponent <= -4 * FRACTIONAL_BITS {
+        return Some(minimum_difficulty_target_bits()?);
+    }
+    if exponent >= 0 {
+        return Some(crate::consensus::TARGET_BITS_START);
+    }
+
+    let shifts = exponent.div_euclid(FRACTIONAL_BITS);
+    let fraction = u128::try_from(exponent.rem_euclid(FRACTIONAL_BITS)).ok()?;
+    let fraction_squared = fraction.checked_mul(fraction)?;
+    let fraction_cubed = fraction_squared.checked_mul(fraction)?;
+    let polynomial = ASERT_COEFFICIENT_1
+        .checked_mul(fraction)?
+        .checked_add(ASERT_COEFFICIENT_2.checked_mul(fraction_squared)?)?
+        .checked_add(ASERT_COEFFICIENT_3.checked_mul(fraction_cubed)?)?
+        .checked_add(1_u128 << 47)?;
+    let factor = u32::try_from((polynomial >> 48).checked_add(1 << 16)?).ok()?;
+
+    let start = PoWTarget::from_compact(crate::consensus::TARGET_BITS_START)?;
+    let difficulty_floor = PoWTarget::from_compact(minimum_difficulty_target_bits()?)?;
+    let scaled = start.scale_ratio(factor, 1 << 16)?;
+    let shift = u32::try_from(-shifts).ok()?;
+    let shifted = shift_target_right(scaled, shift);
+    Some(shifted.max(difficulty_floor).to_compact())
 }
 
-/// Computes a linear weighted moving average target from N solved blocks and
-/// N+1 timestamps. The newest solve interval receives the largest weight.
-pub fn next_lwma_difficulty(target_bits: &[u32], timestamps: &[u64]) -> Option<u32> {
-    let window = usize::try_from(DIFFICULTY_ADJUSTMENT_WINDOW).ok()?;
-    if target_bits.len() != window || timestamps.len() != window + 1 {
-        return None;
+fn shift_target_right(target: PoWTarget, shift: u32) -> PoWTarget {
+    let mut bytes = *target.as_bytes();
+    if shift >= 256 {
+        return PoWTarget::from_compact(minimum_difficulty_target_bits().expect("valid floor"))
+            .expect("valid floor target");
     }
 
-    let mut weighted_solve_time = 0_u64;
-    let mut total_work = 0_u64;
-    let max_solve_time = TARGET_BLOCK_TIME_SECONDS.checked_mul(DIFFICULTY_TIMESPAN_CLAMP_FACTOR)?;
-
-    for index in 1..=window {
-        let previous_timestamp = timestamps[index - 1];
-        let current_timestamp = timestamps[index].max(previous_timestamp.saturating_add(1));
-        let solve_time = current_timestamp
-            .saturating_sub(previous_timestamp)
-            .clamp(1, max_solve_time);
-        let weight = u64::try_from(index).ok()?;
-        weighted_solve_time = weighted_solve_time.checked_add(weight.checked_mul(solve_time)?)?;
-        total_work = total_work.checked_add(work_as_u64(block_work(target_bits[index - 1])?)?)?;
+    for _ in 0..shift {
+        let mut carry = 0_u8;
+        for byte in &mut bytes {
+            let next_carry = *byte & 1;
+            *byte = (*byte >> 1) | (carry << 7);
+            carry = next_carry;
+        }
     }
 
-    // Prevent extreme timestamp compression from causing an unbounded jump.
-    let minimum_weighted_time = u64::try_from(window)
-        .ok()?
-        .checked_mul(u64::try_from(window).ok()?)?
-        .checked_mul(TARGET_BLOCK_TIME_SECONDS)?
-        / 20;
-    weighted_solve_time = weighted_solve_time.max(minimum_weighted_time);
-
-    let expected_weighted_time = TARGET_BLOCK_TIME_SECONDS
-        .checked_mul(u64::try_from(window).ok()?)?
-        .checked_mul(u64::try_from(window + 1).ok()?)?
-        / 2;
-    let average_work = total_work / u64::try_from(window).ok()?;
-    let starting_work = work_as_u64(block_work(crate::consensus::TARGET_BITS_START)?)?;
-    let numerator = starting_work.checked_mul(weighted_solve_time)?;
-    let denominator = average_work.checked_mul(expected_weighted_time)?;
-    let numerator = u32::try_from(numerator).ok()?;
-    let denominator = u32::try_from(denominator).ok()?;
-
-    let start_target = PoWTarget::from_compact(crate::consensus::TARGET_BITS_START)?;
-    let pow_limit = PoWTarget::from_compact(crate::consensus::TARGET_BITS_START)?;
-    let difficulty_floor = PoWTarget::from_compact(minimum_difficulty_target_bits()?)?;
-    let next = start_target.scale_ratio(numerator, denominator)?;
-    let next = next.min(pow_limit).max(difficulty_floor);
-    Some(next.to_compact())
+    PoWTarget::from_bytes(bytes).unwrap_or_else(|| {
+        PoWTarget::from_compact(minimum_difficulty_target_bits().expect("valid floor"))
+            .expect("valid floor target")
+    })
 }
 
 pub fn expected_difficulty_for_height<E>(
     next_height: u64,
-    parent_difficulty: u32,
+    _parent_difficulty: u32,
     mut sample_at: impl FnMut(u64) -> Result<(u64, u32), E>,
 ) -> Result<Option<u32>, E> {
     if next_height == 1 {
         return Ok(Some(crate::consensus::TARGET_BITS_START));
     }
 
-    if next_height <= DIFFICULTY_ADJUSTMENT_WINDOW {
-        return Ok(Some(parent_difficulty));
-    }
-
-    let first_height = next_height - DIFFICULTY_ADJUSTMENT_WINDOW - 1;
-    let mut timestamps = Vec::with_capacity(DIFFICULTY_ADJUSTMENT_WINDOW as usize + 1);
-    let mut target_bits = Vec::with_capacity(DIFFICULTY_ADJUSTMENT_WINDOW as usize);
-    for height in first_height..next_height {
-        let (timestamp, bits) = sample_at(height)?;
-        timestamps.push(timestamp);
-        if height > first_height {
-            target_bits.push(bits);
-        }
-    }
-    Ok(next_lwma_difficulty(&target_bits, &timestamps))
+    let (anchor_timestamp, _) = sample_at(1)?;
+    let (parent_timestamp, _) = sample_at(next_height - 1)?;
+    Ok(next_asert_difficulty(
+        anchor_timestamp,
+        parent_timestamp,
+        next_height - 1,
+    ))
 }
 
 pub const MIN_BLOCK_REWARD_COINS: u128 = 100;
@@ -189,17 +192,6 @@ pub fn reward_for_previous_hash(previous_hash: [u8; 32]) -> Amount {
         input[..32].copy_from_slice(digest.as_bytes());
         input[32..].copy_from_slice(&counter.to_be_bytes());
         counter = counter.wrapping_add(1);
-    }
-}
-
-#[cfg(test)]
-mod difficulty_lwma_tests {
-    use super::*;
-
-    #[test]
-    fn lwma_uses_a_120_block_window_and_targets_one_hour() {
-        assert_eq!(DIFFICULTY_ADJUSTMENT_WINDOW, 120);
-        assert_eq!(DIFFICULTY_TARGET_TIMESPAN_SECONDS, 60 * 60);
     }
 }
 

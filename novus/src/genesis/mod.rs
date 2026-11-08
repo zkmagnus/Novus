@@ -5,8 +5,7 @@ use std::{error::Error, fmt};
 use crate::{
     blockchain::{Block, GENESIS_TARGET_BITS, MAX_BLOCK_SIZE},
     consensus::{
-        BLOCK_EMISSION, DIFFICULTY_ADJUSTMENT_WINDOW, DIFFICULTY_ALGORITHM,
-        DIFFICULTY_TARGET_TIMESPAN_SECONDS, DIFFICULTY_TIMESPAN_CLAMP_FACTOR,
+        BLOCK_EMISSION, DIFFICULTY_ALGORITHM, DIFFICULTY_ASERT_HALF_LIFE_SECONDS,
         FINALITY_DEPTH_BLOCKS, MIN_BLOCK_EMISSION, POW_ALGORITHM, TARGET_BITS_START,
         TARGET_BLOCK_TIME_SECONDS,
     },
@@ -52,10 +51,8 @@ struct ChainSpecIdentity<'a> {
     genesis_target_bits: u32,
     target_bits_start: u32,
 
-    difficulty_adjustment_window: u64,
     target_block_time_seconds: u64,
-    difficulty_target_timespan_seconds: u64,
-    difficulty_timespan_clamp_factor: u64,
+    difficulty_asert_half_life_seconds: u64,
     max_difficulty_multiplier: u32,
     median_time_past_window: u8,
     max_future_timestamp_drift_seconds: u64,
@@ -126,13 +123,8 @@ pub fn chain_spec_hash() -> Result<Hash, GenesisError> {
         genesis_target_bits: GENESIS_TARGET_BITS,
         target_bits_start: TARGET_BITS_START,
 
-        difficulty_adjustment_window: DIFFICULTY_ADJUSTMENT_WINDOW,
-
         target_block_time_seconds: TARGET_BLOCK_TIME_SECONDS,
-
-        difficulty_target_timespan_seconds: DIFFICULTY_TARGET_TIMESPAN_SECONDS,
-
-        difficulty_timespan_clamp_factor: DIFFICULTY_TIMESPAN_CLAMP_FACTOR,
+        difficulty_asert_half_life_seconds: DIFFICULTY_ASERT_HALF_LIFE_SECONDS,
         max_difficulty_multiplier: crate::consensus::MAX_DIFFICULTY_MULTIPLIER,
         median_time_past_window: crate::consensus::MEDIAN_TIME_PAST_WINDOW as u8,
         max_future_timestamp_drift_seconds: crate::consensus::MAX_FUTURE_TIMESTAMP_DRIFT_SECONDS,

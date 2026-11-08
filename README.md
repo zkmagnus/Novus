@@ -1,9 +1,3 @@
-<p align="center">
-  <img src="assets/novus.png" width="160" alt="Novus">
-</p>
-
-<h1 align="center">Novus</h1>
-
 # Novus
 
 **Novus** is an experimental Layer 1 blockchain inspired by the world, factions, and economy of the **RF Online** game.
@@ -143,7 +137,7 @@ difficulty target
 
 model.
 
-Chip War epochs last 3 days (8,640 blocks at the 30-second target). Tax and exchange outcomes settle at each epoch boundary. Proof-of-work difficulty uses LWMA with a 120-block window (about one hour) and retargets every block after the initial window is available. Each solve-time sample is capped at six target intervals, and network difficulty has a hard ceiling of 16x its starting value; if hash power grows beyond that ceiling, blocks may arrive faster than the 30-second target. Block timestamps must be after the median time of recent blocks and no more than two hours ahead of local time.
+Chip War epochs last 3 days (8,640 blocks at the 30-second target). Tax and exchange outcomes settle at each epoch boundary. Proof-of-work difficulty uses ASERT with a one-hour half-life, anchored at block 1, and recalculates for each block. Network difficulty has a hard ceiling of 16x its starting value; if hash power grows beyond that ceiling, blocks may arrive faster than the 30-second target. ASERT targets the long-run average and does not guarantee that each block takes 30 seconds. Block timestamps must be after the median time of recent blocks and no more than two hours ahead of local time.
 
 ---
 

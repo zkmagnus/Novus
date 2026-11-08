@@ -7,20 +7,15 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use crate::{
     blockchain::{Header, MAX_BLOCK_SIZE},
     consensus::{
-        DIFFICULTY_ADJUSTMENT_WINDOW, ForkChoiceError, MEDIAN_TIME_PAST_WINDOW, Work, block_work,
-        expected_difficulty_for_height, unix_time_now, validate_timestamp,
+        ForkChoiceError, MEDIAN_TIME_PAST_WINDOW, TARGET_BITS_START, Work, block_work,
+        next_asert_difficulty, unix_time_now, validate_timestamp,
     },
 };
 use common::Height;
 
 use crypto::BlockHash;
 
-pub const RECENT_HEADER_WINDOW: usize =
-    if DIFFICULTY_ADJUSTMENT_WINDOW as usize + 1 > MEDIAN_TIME_PAST_WINDOW {
-        DIFFICULTY_ADJUSTMENT_WINDOW as usize + 1
-    } else {
-        MEDIAN_TIME_PAST_WINDOW
-    };
+pub const RECENT_HEADER_WINDOW: usize = MEDIAN_TIME_PAST_WINDOW;
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct HeaderAtHeight {
@@ -92,6 +87,7 @@ pub fn verify_header_chain(
     }
 
     let mut previous = first;
+    let mut difficulty_anchor = first;
     let mut cumulative_work = Work::ZERO;
     let mut recent = vec![first.clone()];
     for current in &headers[1..] {
@@ -105,7 +101,7 @@ pub fn verify_header_chain(
 
         validate_header_timestamp(&current.header, &recent)?;
 
-        let expected = expected_header_difficulty(previous, &recent)?;
+        let expected = expected_header_difficulty(previous, difficulty_anchor)?;
 
         if current.header.target_bits != expected {
             return Err(HeaderChainError::InvalidHeaderChain(
@@ -123,6 +119,9 @@ pub fn verify_header_chain(
         cumulative_work = cumulative_work.saturating_add(work);
 
         previous = current;
+        if current.height.0 == 1 {
+            difficulty_anchor = current;
+        }
         recent.push(current.clone());
 
         if recent.len() > RECENT_HEADER_WINDOW {
@@ -160,20 +159,22 @@ fn validate_header_timestamp(
 
 fn expected_header_difficulty(
     previous: &HeaderAtHeight,
-    recent: &[HeaderAtHeight],
+    difficulty_anchor: &HeaderAtHeight,
 ) -> Result<u32, HeaderChainError> {
     let next_height = previous.height.0.saturating_add(1);
-
-    expected_difficulty_for_height(next_height, previous.header.target_bits, |height| {
-        let header = &recent
-            .iter()
-            .find(|candidate| candidate.height.0 == height)
-            .ok_or(HeaderChainError::InvalidHeaderChain(
-                ForkChoiceError::MissingParent,
-            ))?
-            .header;
-        Ok::<(u64, u32), HeaderChainError>((header.timestamp, header.target_bits))
-    })?
+    if next_height == 1 {
+        return Ok(TARGET_BITS_START);
+    }
+    if difficulty_anchor.height.0 != 1 || previous.height.0 < difficulty_anchor.height.0 {
+        return Err(HeaderChainError::InvalidHeaderChain(
+            ForkChoiceError::InvalidDifficulty,
+        ));
+    }
+    next_asert_difficulty(
+        difficulty_anchor.header.timestamp,
+        previous.header.timestamp,
+        previous.height.0,
+    )
     .ok_or(HeaderChainError::InvalidHeaderChain(
         ForkChoiceError::InvalidDifficulty,
     ))
@@ -190,10 +191,15 @@ pub fn header_validation_state(
         .cloned()
         .ok_or(HeaderChainError::EmptyHeaderChain)?;
 
-    let difficulty_anchor = validated_headers
-        .get(usize::from(tip.height.0 > 0))
-        .cloned()
-        .ok_or(HeaderChainError::EmptyHeaderChain)?;
+    let difficulty_anchor = if tip.height.0 == 0 {
+        validated_headers[0].clone()
+    } else {
+        validated_headers
+            .get(1)
+            .filter(|header| header.height.0 == 1)
+            .cloned()
+            .ok_or(HeaderChainError::EmptyHeaderChain)?
+    };
 
     let start = validated_headers.len().saturating_sub(RECENT_HEADER_WINDOW);
 
@@ -229,6 +235,7 @@ pub fn verify_header_chain_extension(
     let mut previous = state.header.clone();
     let mut previous_hash = checkpoint_hash;
     let mut cumulative_work = state.cumulative_work;
+    let mut difficulty_anchor = state.difficulty_anchor.clone();
     let mut recent = state.recent_headers.clone();
 
     for chain_header in headers {
@@ -244,23 +251,9 @@ pub fn verify_header_chain_extension(
 
         validate_header_timestamp(header, &recent)?;
 
-        let expected_difficulty = expected_difficulty_for_height(
-            chain_header.height.0,
-            previous.target_bits,
-            |height| {
-                let header = &recent
-                    .iter()
-                    .find(|candidate| candidate.height.0 == height)
-                    .ok_or(HeaderChainError::InvalidHeaderChain(
-                        ForkChoiceError::MissingParent,
-                    ))?
-                    .header;
-                Ok::<(u64, u32), HeaderChainError>((header.timestamp, header.target_bits))
-            },
-        )?
-        .ok_or(HeaderChainError::InvalidHeaderChain(
-            ForkChoiceError::InvalidDifficulty,
-        ))?;
+        let previous_at_height = HeaderAtHeight::new(previous_height, previous.clone());
+        let expected_difficulty =
+            expected_header_difficulty(&previous_at_height, &difficulty_anchor)?;
 
         if header.target_bits != expected_difficulty {
             return Err(HeaderChainError::InvalidHeaderChain(
@@ -279,6 +272,9 @@ pub fn verify_header_chain_extension(
 
         previous_height = chain_header.height;
         previous = header.clone();
+        if chain_header.height.0 == 1 {
+            difficulty_anchor = chain_header.clone();
+        }
 
         recent.push(chain_header.clone());
 
@@ -325,7 +321,11 @@ fn advanced_header_validation_state(
 
         cumulative_work,
 
-        difficulty_anchor: state.difficulty_anchor.clone(),
+        difficulty_anchor: headers
+            .iter()
+            .find(|header| header.height.0 == 1)
+            .cloned()
+            .unwrap_or_else(|| state.difficulty_anchor.clone()),
 
         recent_headers,
     })

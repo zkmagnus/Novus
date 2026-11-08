@@ -160,13 +160,11 @@ pub(super) fn handle_rpc_connection(database: &Path, stream: &mut TcpStream) -> 
                 "difficulty": {
                     "target_block_time_seconds": novus::consensus::TARGET_BLOCK_TIME_SECONDS,
                     "algorithm": novus::consensus::DIFFICULTY_ALGORITHM,
-                    "window_blocks": novus::consensus::DIFFICULTY_ADJUSTMENT_WINDOW,
                     "adjusts_every_block": true,
-                    "target_timespan_seconds": novus::consensus::DIFFICULTY_TARGET_TIMESPAN_SECONDS,
+                    "asert_half_life_seconds": novus::consensus::DIFFICULTY_ASERT_HALF_LIFE_SECONDS,
                     "maximum_difficulty_multiplier_from_start": novus::consensus::MAX_DIFFICULTY_MULTIPLIER,
                     "minimum_target_bits": novus::consensus::minimum_difficulty_target_bits(),
                     "maximum_target_bits": novus::consensus::TARGET_BITS_START,
-                    "maximum_solve_time_per_sample_multiplier": novus::consensus::DIFFICULTY_TIMESPAN_CLAMP_FACTOR,
                 },
                 "stake_pow": {
                     "minimum_stake_atomic": novus::consensus::MIN_WAR_STAKE_ATOMIC,
